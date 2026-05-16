@@ -20,7 +20,7 @@ def make_loader(data,c):
     return DataLoader(ds,batch_size=c['training']['batch_size'],shuffle=False,num_workers=c['training'].get('num_workers',0))
 
 def main(config_path):
-    c=load_config(config_path); ensure_dir('outputs/metrics'); ensure_dir('outputs/predictions'); mn='tcn_transformer_ae'; ck=Path(f'outputs/models/{mn}_best.pt')
+    c=load_config(config_path); output_dir=c.get('project', {}).get('output_dir', 'outputs'); ensure_dir(f'{output_dir}/metrics'); ensure_dir(f'{output_dir}/predictions'); mn='tcn_transformer_ae'; ck=Path(output_dir)/'models'/f'{mn}_best.pt'
     if not ck.exists(): raise FileNotFoundError(ck)
     device=torch.device(c['training']['device'] if torch.cuda.is_available() else 'cpu')
     va=load_json(f"{c['data']['splits_dir']}/val.json"); te=load_json(f"{c['data']['splits_dir']}/test.json")
@@ -29,8 +29,8 @@ def main(config_path):
     ad=AdaptiveThreshold(c['threshold']['adaptive_window_size'],c['threshold']['adaptive_k'],c['threshold']['adaptive_min_window'],c['threshold']['update_only_normal'])
     ad.warmup([s for s,y in zip(va_r['scores'],va_r['labels']) if int(y)==0]); pred,thr=ad.predict_many(te_r['scores'])
     m=compute_detection_metrics(te_r['labels'],te_r['scores'],pred); m.update({'model':mn,'threshold_type':'adaptive','window_size':c['threshold']['adaptive_window_size'],'k':c['threshold']['adaptive_k']})
-    pd.DataFrame([m]).to_csv('outputs/metrics/adaptive_threshold_metrics.csv',index=False)
-    save_json({'scores':te_r['scores'],'labels':te_r['labels'],'predictions':pred,'thresholds':thr,'session_ids':te_r.get('session_ids',[])}, 'outputs/predictions/adaptive_predictions.json')
+    pd.DataFrame([m]).to_csv(f'{output_dir}/metrics/adaptive_threshold_metrics.csv',index=False)
+    save_json({'scores':te_r['scores'],'labels':te_r['labels'],'predictions':pred,'thresholds':thr,'session_ids':te_r.get('session_ids',[])}, f'{output_dir}/predictions/adaptive_predictions.json')
     print(m)
 if __name__ == '__main__':
     p=argparse.ArgumentParser(); p.add_argument('--config',required=True); main(p.parse_args().config)

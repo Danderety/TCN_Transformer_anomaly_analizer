@@ -6,6 +6,7 @@ PIPELINE = [
     'scripts/01_prepare_data.py',
     'scripts/02_train_baseline_tcn_ae.py',
     'scripts/03_train_tcn_transformer_ae.py',
+    'scripts/08_train_tcn_transformer_ensemble.py',
     'scripts/04_evaluate_detection.py',
     'scripts/05_evaluate_localization.py',
     'scripts/06_evaluate_adaptive_threshold.py',

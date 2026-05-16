@@ -41,11 +41,22 @@ training:
   num_workers: 0
 
 threshold:
+  method: "quantile"
   fixed_percentile: 95
+  validation_safety_check: true
+  spot_init_quantile: 98
+  spot_risk: 0.0001
+  spot_min_excess: 5
+  spot_for_models: ["tcn_transformer_ae_ensemble"]
   adaptive_window_size: 200
   adaptive_k: 3.0
   adaptive_min_window: 5
   update_only_normal: true
+
+ensemble:
+  enabled: false
+  member_seeds: [42, 43]
+  score_norm: "robust_z_train"
 
 synthetic_anomalies:
   anomaly_ratio: 0.5

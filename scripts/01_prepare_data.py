@@ -38,7 +38,8 @@ def main(config_path):
     save_json({'sequences':te_s,'labels':te_y,'session_ids':te_id}, f"{c['data']['splits_dir']}/test.json")
     save_json({'sequences':sy_s,'labels':sy_y,'localization_masks':sy_m,'anomaly_types':sy_t,'session_ids':[f'synthetic_{i}' for i in range(len(sy_s))]}, f"{c['data']['splits_dir']}/test_synthetic.json")
     vocab.save(f"{c['data']['processed_dir']}/event_vocab.json"); df.to_csv(f"{c['data']['processed_dir']}/parsed_logs.csv", index=False)
-    c['model']['vocab_size']=len(vocab); used=f"{c['data']['processed_dir']}/used_config.yaml"; save_config(c, used); ensure_dir('outputs/configs'); save_config(c, f"outputs/configs/{Path(config_path).stem}_used.yaml")
+    output_dir=c.get('project', {}).get('output_dir', 'outputs')
+    c['model']['vocab_size']=len(vocab); used=f"{c['data']['processed_dir']}/used_config.yaml"; save_config(c, used); ensure_dir(f'{output_dir}/configs'); save_config(c, f"{output_dir}/configs/{Path(config_path).stem}_used.yaml")
     print(f"Prepared. vocab={len(vocab)} train_normal={len(normal_tr_s)} val={len(va_s)} test={len(te_s)} synthetic={len(sy_s)}")
     print(f"Use config: {used}")
 

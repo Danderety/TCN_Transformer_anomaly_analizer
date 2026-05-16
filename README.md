@@ -24,6 +24,7 @@ src/evaluation/          scoring, thresholds, metrics
 src/xai/                 heatmap и gradient saliency
 src/visualization/       графики
 scripts/                 этапы запуска
+notebooks/               notebook-first запуск экспериментов
 outputs/                 модели, метрики, предсказания, графики
 main.py                  полный pipeline
 ```
@@ -54,6 +55,14 @@ python main.py --config configs/experiment_demo.yaml --generate_demo
 Это создаст toy-логи, обучит baseline и основную модель, посчитает метрики и сохранит графики.
 
 ## 4. Запуск на LO2
+
+Ссылки на данные также продублированы в `data/README.md`:
+
+| Dataset | Куда распаковать | Source |
+|---|---|---|
+| LO2 | `data/raw/lo2/` | https://doi.org/10.5281/zenodo.14265858 |
+| Loghub-2.0 | `data/raw/loghub2/` | https://zenodo.org/records/8275861 |
+| RCAEval | `data/raw/rcaeval/` | https://github.com/phamquiluan/RCAEval |
 
 1. Распакуй LO2 в:
 
@@ -117,11 +126,45 @@ service     — компонент/сервис
 python scripts/01_prepare_data.py --config configs/experiment_lo2.yaml
 python scripts/02_train_baseline_tcn_ae.py --config data/processed/lo2/used_config.yaml
 python scripts/03_train_tcn_transformer_ae.py --config data/processed/lo2/used_config.yaml
+python scripts/08_train_tcn_transformer_ensemble.py --config data/processed/lo2/used_config.yaml
 python scripts/04_evaluate_detection.py --config data/processed/lo2/used_config.yaml
 python scripts/05_evaluate_localization.py --config data/processed/lo2/used_config.yaml
 python scripts/06_evaluate_adaptive_threshold.py --config data/processed/lo2/used_config.yaml
 python scripts/07_generate_report_assets.py --config data/processed/lo2/used_config.yaml
 ```
+
+## 6.1 Запуск через Jupyter
+
+Открывай:
+
+```text
+notebooks/04_final_results.ipynb
+```
+
+Тетрадка не дублирует код проекта: она вызывает stage-функции из
+`src/utils/notebook_workflow.py`, которые ссылаются на `scripts/` и `src/`.
+Графики также не пишутся в notebook: они создаются через
+`scripts/07_generate_report_assets.py`, а реализация лежит в
+`src/visualization/plots.py`.
+
+Для TCN-Transformer ensemble используются:
+
+```text
+scripts/08_train_tcn_transformer_ensemble.py
+src/evaluation/ensemble.py
+src/evaluation/thresholds.py
+```
+
+Пороговая политика:
+
+```text
+member scores -> robust-z по train scores -> mean ensemble score
+             -> SPOT/POT raw threshold
+             -> validation safety-check: final=min(raw, validation recall-lock)
+```
+
+Это правило закреплено в конфиге через `ensemble.*`, `threshold.spot_for_models`
+и `threshold.validation_safety_check`.
 
 ## 7. Куда смотреть результаты
 
@@ -129,6 +172,7 @@ python scripts/07_generate_report_assets.py --config data/processed/lo2/used_con
 outputs/models/
   tcn_ae_best.pt
   tcn_transformer_ae_best.pt
+  tcn_transformer_ae_seed*_best.pt
 
 outputs/metrics/
   detection_metrics.csv
@@ -139,6 +183,7 @@ outputs/metrics/
 outputs/predictions/
   tcn_ae_test_predictions.json
   tcn_transformer_ae_test_predictions.json
+  tcn_transformer_ae_ensemble_test_predictions.json
   tcn_transformer_ae_localization_predictions.json
   adaptive_predictions.json
 

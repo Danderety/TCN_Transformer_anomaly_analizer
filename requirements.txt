@@ -6,3 +6,4 @@ matplotlib
 pyyaml
 tqdm
 tabulate
+scipy

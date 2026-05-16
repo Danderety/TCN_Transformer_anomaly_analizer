@@ -9,7 +9,7 @@ from src.models.factory import build_model
 from src.training.trainer import Trainer
 from src.training.checkpointing import save_checkpoint
 
-def train_model_from_config(config, model_name):
+def train_model_from_config(config, model_name, checkpoint_path=None):
     device=torch.device(config['training']['device'] if torch.cuda.is_available() else 'cpu')
     tr=load_json(f"{config['data']['splits_dir']}/train.json"); va=load_json(f"{config['data']['splits_dir']}/val.json")
     tr_ds=LogSequenceDataset(tr['sequences'],tr.get('labels'),max_len=config['data']['max_seq_len'],pad_id=config['data']['pad_id'],session_ids=tr.get('session_ids'))
@@ -18,7 +18,8 @@ def train_model_from_config(config, model_name):
     va_ld=DataLoader(va_ds,batch_size=config['training']['batch_size'],shuffle=False,num_workers=config['training'].get('num_workers',0))
     model=build_model(model_name,config).to(device); opt=torch.optim.AdamW(model.parameters(),lr=config['training']['learning_rate'],weight_decay=config['training']['weight_decay'])
     trainer=Trainer(model,opt,device,config['data']['pad_id'],config['training']['gradient_clip'])
-    best=float('inf'); patience=0; ckpt=f'outputs/models/{model_name}_best.pt'
+    output_dir = config.get('project', {}).get('output_dir', 'outputs')
+    best=float('inf'); patience=0; ckpt=checkpoint_path or f'{output_dir}/models/{model_name}_best.pt'
     for epoch in range(1,config['training']['epochs']+1):
         tl=trainer.train_epoch(tr_ld); vl=trainer.validate_epoch(va_ld); print(f'{model_name} epoch={epoch:03d} train_loss={tl:.4f} val_loss={vl:.4f}')
         if vl < best:
