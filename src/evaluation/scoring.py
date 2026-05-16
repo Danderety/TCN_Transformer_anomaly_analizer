@@ -9,13 +9,22 @@ def reconstruction_error_per_position(model, x, pad_id=0):
     return token_errors, scores
 
 @torch.no_grad()
-def score_dataset(model, loader, device, pad_id=0):
+def score_dataset(model, loader, device, pad_id=0, include_details=True):
     out={'scores': [], 'token_errors': [], 'inputs': [], 'labels': [], 'localization_masks': [], 'session_ids': []}
     model.eval()
     for batch in loader:
         x=batch['x'].to(device); te, sc = reconstruction_error_per_position(model, x, pad_id)
-        out['scores'] += sc.cpu().numpy().tolist(); out['token_errors'] += te.cpu().numpy().tolist(); out['inputs'] += x.cpu().numpy().tolist()
+        out['scores'] += sc.cpu().numpy().tolist()
+        if include_details:
+            out['token_errors'] += te.cpu().numpy().tolist()
+            out['inputs'] += x.cpu().numpy().tolist()
         if 'y' in batch: out['labels'] += batch['y'].cpu().numpy().tolist()
-        if 'loc_mask' in batch: out['localization_masks'] += batch['loc_mask'].cpu().numpy().tolist()
+        if include_details and 'loc_mask' in batch:
+            out['localization_masks'] += batch['loc_mask'].cpu().numpy().tolist()
         if 'session_id' in batch: out['session_ids'] += list(batch['session_id'])
+        del x, te, sc
+    if not include_details:
+        out.pop('token_errors')
+        out.pop('inputs')
+        out.pop('localization_masks')
     return out

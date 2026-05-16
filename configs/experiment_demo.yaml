@@ -37,6 +37,7 @@ training:
   weight_decay: 0.00001
   gradient_clip: 1.0
   patience: 5
+  monitor_detection_metrics: true
   device: "cuda"
   num_workers: 0
 
@@ -44,6 +45,9 @@ threshold:
   method: "quantile"
   fixed_percentile: 95
   validation_safety_check: true
+  target_recall: 1.0
+  enforce_validation_recall: true
+  exact_recall_diagnostics: true
   spot_init_quantile: 98
   spot_risk: 0.0001
   spot_min_excess: 5
@@ -65,3 +69,6 @@ evaluation:
   models: ["tcn_ae", "tcn_transformer_ae"]
   top_k: [1, 3, 5]
   num_heatmap_examples: 20
+
+xai:
+  save_attention_matrices: 0

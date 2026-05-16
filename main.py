@@ -1,5 +1,6 @@
 import argparse
 import subprocess
+import sys
 from pathlib import Path
 
 PIPELINE = [
@@ -15,10 +16,10 @@ PIPELINE = [
 
 def main(config, generate_demo=False):
     if generate_demo:
-        subprocess.run(['python', 'scripts/00_generate_demo_data.py', '--output_dir', 'data/raw/demo'], check=True)
+        subprocess.run([sys.executable, 'scripts/00_generate_demo_data.py', '--output_dir', 'data/raw/demo'], check=True)
     for script in PIPELINE:
         print(f'\n=== {script} ===')
-        subprocess.run(['python', script, '--config', config], check=True)
+        subprocess.run([sys.executable, script, '--config', config], check=True)
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()

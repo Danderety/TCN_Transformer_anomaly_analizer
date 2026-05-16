@@ -7,7 +7,8 @@ def compute_fixed_threshold(scores, percentile=95):
     return float(np.percentile(scores, _percentile_value(percentile)))
 
 def apply_threshold(scores, threshold):
-    return (np.array(scores) > threshold).astype(int).tolist()
+    scores = _scores_for_prediction(scores)
+    return (scores >= float(threshold)).astype(int).tolist()
 
 def _percentile_value(value):
     value = float(value)
@@ -16,6 +17,12 @@ def _percentile_value(value):
 def _finite_scores(scores):
     scores = np.asarray(scores, dtype=float)
     return scores[np.isfinite(scores)]
+
+def _scores_for_prediction(scores):
+    scores = np.asarray(scores, dtype=float)
+    # Recall-first fail-closed behavior: a broken/non-finite anomaly score is
+    # treated as suspicious, not as normal.
+    return np.nan_to_num(scores, nan=np.inf, posinf=np.inf, neginf=np.inf)
 
 def next_below(x):
     return float(np.nextafter(float(x), -np.inf))
@@ -71,19 +78,81 @@ def recall_lock_threshold(y_true, scores, fallback_percentile=95):
     scores = np.asarray(scores, dtype=float)
     if len(scores) == 0:
         return float('inf'), 'recall_lock_empty_scores'
-    finite_scores = scores.copy()
-    finite_scores[~np.isfinite(finite_scores)] = np.inf
-    positive_scores = finite_scores[y_true == 1]
+    safe_scores = _scores_for_prediction(scores)
+    positive_scores = safe_scores[y_true == 1]
     if len(positive_scores) == 0:
-        threshold, _ = train_quantile_candidate(finite_scores, fallback_percentile)
+        threshold, _ = train_quantile_candidate(safe_scores, fallback_percentile)
         return threshold, 'recall_lock_no_positive_labels'
     return next_below(np.min(positive_scores)), 'recall_lock_min_anomaly'
+
+def threshold_for_min_recall(y_true, scores, min_recall=1.0, fallback_percentile=95):
+    y_true = np.asarray(y_true, dtype=int)
+    scores = _scores_for_prediction(scores)
+    positive_scores = np.sort(scores[y_true == 1])
+    if len(positive_scores) == 0:
+        return recall_lock_threshold(y_true, scores, fallback_percentile)
+    min_recall = min(max(float(min_recall), 0.0), 1.0)
+    max_fn = int(np.floor((1.0 - min_recall) * len(positive_scores)))
+    max_fn = min(max(max_fn, 0), len(positive_scores) - 1)
+    return next_below(positive_scores[max_fn]), f'min_recall_{min_recall:g}_fn_budget_{max_fn}'
 
 def threshold_for_exact_recall(y_true, scores):
     threshold, note = recall_lock_threshold(y_true, scores)
     pred = apply_threshold(scores, threshold)
     metrics = compute_detection_metrics(y_true, scores, pred)
     return threshold, metrics, note
+
+def _fbeta_score(precision, recall, beta=3.0):
+    precision = float(precision or 0.0)
+    recall = float(recall or 0.0)
+    beta2 = float(beta) ** 2
+    denom = beta2 * precision + recall
+    if denom <= 0:
+        return 0.0
+    return (1.0 + beta2) * precision * recall / denom
+
+def recall_fpr_tradeoff_candidate(y_true, scores, target_recall=0.99, max_fpr=0.25, beta=3.0):
+    """Pick a validation operating point that protects recall without burning all normals."""
+    y_true = np.asarray(y_true, dtype=int)
+    scores = _scores_for_prediction(scores)
+    if len(scores) == 0:
+        return float('inf'), 'tradeoff_empty_scores', {}
+    finite = scores[np.isfinite(scores)]
+    if len(finite) == 0:
+        return float('inf'), 'tradeoff_nonfinite_scores', {}
+
+    unique = np.unique(finite)
+    candidates = [next_below(float(unique.min()))]
+    candidates += [float(x) for x in unique]
+    candidates.append(float(np.nextafter(float(unique.max()), np.inf)))
+
+    rows = []
+    for threshold in candidates:
+        pred = apply_threshold(scores, threshold)
+        metrics = compute_detection_metrics(y_true, scores, pred)
+        metrics['_threshold'] = float(threshold)
+        metrics['_fbeta'] = _fbeta_score(metrics['precision'], metrics['recall'], beta)
+        rows.append(metrics)
+
+    target_recall = float(target_recall)
+    max_fpr = float(max_fpr)
+    tiers = [
+        ('recall_fpr', [m for m in rows if m['recall'] + 1e-12 >= target_recall and m['false_positive_rate'] <= max_fpr + 1e-12]),
+        ('recall_only', [m for m in rows if m['recall'] + 1e-12 >= target_recall]),
+        ('fpr_only', [m for m in rows if m['false_positive_rate'] <= max_fpr + 1e-12]),
+        ('best_effort', rows),
+    ]
+    for tier_name, tier_rows in tiers:
+        if tier_rows:
+            best = max(
+                tier_rows,
+                key=lambda m: (m['_fbeta'], m['recall'], -m['false_positive_rate'], m['_threshold']),
+            )
+            threshold = best.pop('_threshold')
+            fbeta = best.pop('_fbeta')
+            best['fbeta'] = fbeta
+            return float(threshold), f'tradeoff_{tier_name}_recall{target_recall:g}_maxfpr{max_fpr:g}_beta{float(beta):g}', best
+    return float('inf'), 'tradeoff_no_candidates', {}
 
 def select_validation_safe_threshold(train_scores, val_scores, val_labels, threshold_config=None, raw_method='quantile'):
     """Select raw threshold, then optionally apply validation safety-check.
@@ -108,24 +177,47 @@ def select_validation_safe_threshold(train_scores, val_scores, val_labels, thres
 
     raw_pred = apply_threshold(val_scores, raw_threshold)
     raw_metrics = compute_detection_metrics(val_labels, val_scores, raw_pred)
-    safe_threshold, safe_note = recall_lock_threshold(val_labels, val_scores, fixed_percentile)
+    target_recall = float(threshold_config.get('target_recall', 1.0))
+    safe_threshold, safe_note = threshold_for_min_recall(val_labels, val_scores, target_recall, fixed_percentile)
     safe_pred = apply_threshold(val_scores, safe_threshold)
     safe_metrics = compute_detection_metrics(val_labels, val_scores, safe_pred)
 
     safety_enabled = bool(threshold_config.get('validation_safety_check', True))
-    final_threshold = min(float(raw_threshold), float(safe_threshold)) if safety_enabled else float(raw_threshold)
+    selection_policy = str(threshold_config.get('selection_policy', 'recall_lock')).lower()
+    tradeoff_threshold = None
+    tradeoff_note = None
+    tradeoff_metrics = None
+    if selection_policy in {'recall_fpr_tradeoff', 'balanced_recall'}:
+        tradeoff_threshold, tradeoff_note, tradeoff_metrics = recall_fpr_tradeoff_candidate(
+            val_labels,
+            val_scores,
+            target_recall=threshold_config.get('target_recall', 0.99),
+            max_fpr=threshold_config.get('max_validation_fpr', 0.25),
+            beta=threshold_config.get('fbeta_beta', 3.0),
+        )
+        final_threshold = float(tradeoff_threshold)
+    else:
+        final_threshold = min(float(raw_threshold), float(safe_threshold)) if safety_enabled else float(raw_threshold)
     final_pred = apply_threshold(val_scores, final_threshold)
     final_metrics = compute_detection_metrics(val_labels, val_scores, final_pred)
+    if threshold_config.get('enforce_validation_recall', True) and selection_policy not in {'recall_fpr_tradeoff', 'balanced_recall'} and np.sum(np.asarray(val_labels, dtype=int) == 1) > 0:
+        if final_metrics['recall'] + 1e-12 < target_recall:
+            raise AssertionError(
+                f"validation target recall failed: recall={final_metrics['recall']:.6f} target={target_recall:.6f}"
+            )
     return {
         'threshold': float(final_threshold),
-        'threshold_note': f'final=min(raw,{safe_note})' if safety_enabled else 'final=raw',
-        'threshold_type': f'{raw_method}_validation_safe' if safety_enabled else raw_method,
+        'threshold_note': tradeoff_note or (f'final=min(raw,{safe_note})' if safety_enabled else 'final=raw'),
+        'threshold_type': f'{raw_method}_{selection_policy}' if selection_policy in {'recall_fpr_tradeoff', 'balanced_recall'} else (f'{raw_method}_validation_safe' if safety_enabled else raw_method),
         'raw_threshold': float(raw_threshold),
         'raw_note': raw_note,
         'raw_metrics': raw_metrics,
         'safe_threshold': float(safe_threshold),
         'safe_note': safe_note,
         'safe_metrics': safe_metrics,
+        'tradeoff_threshold': None if tradeoff_threshold is None else float(tradeoff_threshold),
+        'tradeoff_note': tradeoff_note,
+        'tradeoff_metrics': tradeoff_metrics,
         'metrics': final_metrics,
         'was_safety_applied': bool(safety_enabled and final_threshold < raw_threshold - 1e-12),
     }
