@@ -223,17 +223,75 @@ def select_validation_safe_threshold(train_scores, val_scores, val_labels, thres
     }
 
 class AdaptiveThreshold:
-    def __init__(self, window_size=200, k=3.0, min_window=30, update_only_normal=True):
-        self.scores=deque(maxlen=window_size); self.k=k; self.min_window=min_window; self.update_only_normal=update_only_normal
+    def __init__(
+        self,
+        window_size=200,
+        k=3.0,
+        min_window=30,
+        update_only_normal=True,
+        method='mean_std',
+        quantile=95,
+        min_scale=1e-6,
+        warmup_trim_percentile=None,
+        threshold_floor=None,
+        threshold_ceiling=None,
+    ):
+        self.scores = deque(maxlen=int(window_size))
+        self.k = float(k)
+        self.min_window = int(min_window)
+        self.update_only_normal = bool(update_only_normal)
+        self.method = str(method or 'mean_std').lower()
+        self.quantile = _percentile_value(quantile)
+        self.min_scale = float(min_scale)
+        self.warmup_trim_percentile = warmup_trim_percentile
+        self.threshold_floor = threshold_floor
+        self.threshold_ceiling = threshold_ceiling
+
     def warmup(self, scores):
-        for s in scores: self.scores.append(float(s))
+        values = _finite_scores(scores)
+        if self.warmup_trim_percentile is not None and len(values) > 0:
+            limit = np.percentile(values, _percentile_value(self.warmup_trim_percentile))
+            values = values[values <= limit]
+        for s in values:
+            self.scores.append(float(s))
+
+    def _clip_threshold(self, threshold):
+        if self.threshold_floor is not None:
+            threshold = max(float(threshold), float(self.threshold_floor))
+        if self.threshold_ceiling is not None:
+            threshold = min(float(threshold), float(self.threshold_ceiling))
+        return float(threshold)
+
     def get_threshold(self):
-        if len(self.scores) < self.min_window: return None
-        a=np.array(self.scores); return float(a.mean()+self.k*a.std())
+        if len(self.scores) < self.min_window:
+            return None
+        a = _finite_scores(self.scores)
+        if len(a) < self.min_window:
+            return None
+        if self.method in {'mean_std', 'mean+std'}:
+            threshold = float(a.mean() + self.k * a.std())
+        elif self.method in {'robust_mad', 'mad', 'median_mad'}:
+            median = float(np.median(a))
+            mad = float(np.median(np.abs(a - median)))
+            if mad <= self.min_scale:
+                q75, q25 = np.percentile(a, [75, 25])
+                mad = float((q75 - q25) / 1.349)
+            scale = max(mad * 1.4826, self.min_scale)
+            threshold = median + self.k * scale
+        elif self.method in {'quantile', 'rolling_quantile'}:
+            threshold = float(np.percentile(a, self.quantile))
+        else:
+            raise ValueError(f'Unknown adaptive threshold method: {self.method}')
+        return self._clip_threshold(threshold)
+
     def predict_one(self, score):
-        thr=self.get_threshold(); pred=0 if thr is None else int(score > thr)
-        if (not self.update_only_normal) or thr is None or score <= thr: self.scores.append(float(score))
+        score = float(score)
+        thr = self.get_threshold()
+        pred = 0 if thr is None else int(score > thr)
+        if np.isfinite(score) and ((not self.update_only_normal) or thr is None or score <= thr):
+            self.scores.append(score)
         return pred, thr
+
     def predict_many(self, scores):
         p,t=[],[]
         for s in scores:

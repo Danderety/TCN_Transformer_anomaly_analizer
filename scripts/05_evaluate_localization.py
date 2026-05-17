@@ -27,6 +27,10 @@ def _limit_payload(payload, max_samples):
             limited[key] = value
     return limited
 
+def _has_positive_masks(payload):
+    masks = payload.get('localization_masks') or []
+    return any(sum(int(v) for v in mask) > 0 for mask in masks)
+
 def _save_attention_for_model(model, loader, device, config, output_dir, model_name):
     max_matrices = int(config.get('xai', {}).get('save_attention_matrices', 0) or 0)
     r = capture_attention_dataset(model, loader, device, config['data']['pad_id'], max_matrices=max_matrices)
@@ -70,23 +74,29 @@ def _save_attention_for_ensemble(config, loader, device, output_dir):
 
 def main(config_path):
     c=load_config(config_path); output_dir=c.get('project', {}).get('output_dir', 'outputs'); ensure_dir(f'{output_dir}/metrics'); ensure_dir(f'{output_dir}/predictions'); device=torch.device(c['training']['device'] if torch.cuda.is_available() else 'cpu')
-    sy=load_json(f"{c['data']['splits_dir']}/test_synthetic.json")
-    sy=_limit_payload(sy, c.get('evaluation', {}).get('max_localization_samples', 0))
-    ds=LogSequenceDataset(sy['sequences'],sy.get('labels'),sy.get('localization_masks'),c['data']['max_seq_len'],c['data']['pad_id'],sy.get('session_ids'))
+    real=load_json(f"{c['data']['splits_dir']}/test.json")
+    if _has_positive_masks(real):
+        loc_payload=real; localization_source='real_test'
+    else:
+        loc_payload=load_json(f"{c['data']['splits_dir']}/test_synthetic.json"); localization_source='synthetic_test'
+    loc_payload=_limit_payload(loc_payload, c.get('evaluation', {}).get('max_localization_samples', 0))
+    ds=LogSequenceDataset(loc_payload['sequences'],loc_payload.get('labels'),loc_payload.get('localization_masks'),c['data']['max_seq_len'],c['data']['pad_id'],loc_payload.get('session_ids'))
     ld=DataLoader(ds,batch_size=c['training']['batch_size'],shuffle=False,num_workers=c['training'].get('num_workers',0)); rows=[]
     for mn in c['evaluation']['models']:
         if mn == 'tcn_transformer_ae_ensemble':
             attention_metrics = _save_attention_for_ensemble(c, ld, device, output_dir)
             if attention_metrics:
+                attention_metrics['localization_source']=localization_source
                 rows.append(attention_metrics); print(attention_metrics)
             continue
         ck=Path(output_dir)/'models'/f'{mn}_best.pt'
         if not ck.exists(): print(f'Skip {mn}: missing {ck}'); continue
         model=build_model(mn,c).to(device); model,_=load_checkpoint(model,ck,device); r=score_dataset(model,ld,device,c['data']['pad_id'])
-        m=compute_localization_metrics(r['token_errors'],r['localization_masks'],c['evaluation']['top_k']); m.update({'model':mn,'xai_method':'reconstruction_error_heatmap'}); rows.append(m); print(m)
+        m=compute_localization_metrics(r['token_errors'],r['localization_masks'],c['evaluation']['top_k']); m.update({'model':mn,'xai_method':'reconstruction_error_heatmap','localization_source':localization_source}); rows.append(m); print(m)
         save_json({'inputs':r['inputs'],'token_errors':r['token_errors'],'localization_masks':r['localization_masks'],'labels':r['labels'],'session_ids':r.get('session_ids',[])}, f'{output_dir}/predictions/{mn}_localization_predictions.json')
         if mn == 'tcn_transformer_ae':
             attention_metrics = _save_attention_for_model(model, ld, device, c, output_dir, mn)
+            attention_metrics['localization_source']=localization_source
             rows.append(attention_metrics); print(attention_metrics)
         del model
         if torch.cuda.is_available():

@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import pandas as pd
 
@@ -25,21 +26,28 @@ SCRIPT_STAGES = {
 
 DATASET_SOURCES = {
     'lo2': {
-        'target_dir': 'data/raw/lo2',
+        'target_dir': 'data/raw/lo2 там 2 папки logs и metrics',
         'url': 'https://doi.org/10.5281/zenodo.14265858',
         'note': 'LO2 / Light-OAuth2 microservice API anomaly dataset. Put extracted log files under data/raw/lo2/.',
     },
     'loghub2': {
-        'target_dir': 'data/raw/loghub2',
+        'target_dir': 'data/raw/loghub2 без папки тупо данные',
         'url': 'https://zenodo.org/records/8275861',
         'note': 'Loghub-2.0 collection. Put extracted log files under data/raw/loghub2/.',
     },
     'rcaeval': {
-        'target_dir': 'data/raw/rcaeval',
-        'url': 'https://github.com/phamquiluan/RCAEval',
+        'target_dir': 'data/raw/rcaeval папка сюда RE1-OB тупо копировать',
+        'url': 'https://zenodo.org/records/14590730',
         'note': 'RCAEval benchmark repository/data. Put extracted logs under data/raw/rcaeval/.',
     },
 }
+
+LOGHUB_LABEL_CANDIDATES = [
+    PROJECT_ROOT / 'data' / 'raw' / 'loghub2' / 'anomaly_label.csv',
+    PROJECT_ROOT / 'data' / 'raw' / 'loghub2' / 'preprocessed' / 'anomaly_label.csv',
+    PROJECT_ROOT.parent.parent / 'ae_vs_tcn' / 'data' / 'HDFS_v1' / 'preprocessed' / 'anomaly_label.csv',
+    Path.home() / 'Documents' / 'ae_vs_tcn' / 'data' / 'HDFS_v1' / 'preprocessed' / 'anomaly_label.csv',
+]
 
 
 def _load_script(stage):
@@ -72,6 +80,49 @@ def run_stage(stage, config_path):
                 torch.cuda.ipc_collect()
         except Exception:
             pass
+
+
+def cuda_status():
+    try:
+        import torch
+        info = {
+            'torch': torch.__version__,
+            'cuda_available': bool(torch.cuda.is_available()),
+            'cuda_version': torch.version.cuda,
+            'device_count': int(torch.cuda.device_count()),
+        }
+        if torch.cuda.is_available():
+            info['device_name'] = torch.cuda.get_device_name(0)
+        return info
+    except Exception as exc:
+        return {'cuda_available': False, 'error': f'{type(exc).__name__}: {exc}'}
+
+
+def ensure_loghub_gold_labels(raw_dir=None, source_path=None):
+    """Ensure Loghub/HDFS has anomaly_label.csv for BlockId-level gold labels."""
+    raw_dir = Path(raw_dir or PROJECT_ROOT / 'data' / 'raw' / 'loghub2')
+    if not raw_dir.is_absolute():
+        raw_dir = PROJECT_ROOT / raw_dir
+    target = raw_dir / 'anomaly_label.csv'
+    if target.exists() and target.stat().st_size > 0:
+        return target
+
+    candidates = []
+    if source_path is not None:
+        candidates.append(Path(source_path))
+    candidates.extend(LOGHUB_LABEL_CANDIDATES)
+    for candidate in candidates:
+        candidate = Path(candidate)
+        if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, target)
+            return target
+
+    searched = '\n'.join(str(p) for p in candidates)
+    raise FileNotFoundError(
+        'Loghub/HDFS gold labels are required for supervised Loghub training. '
+        f'Put anomaly_label.csv into {raw_dir} or one of:\n{searched}'
+    )
 
 
 def _abs_project_path(path):
@@ -117,6 +168,7 @@ def make_memory_saver_config(
     dataset_name=None,
     output_dir=None,
     batch_size=16,
+    num_workers=0,
     max_localization_samples=512,
     epochs=100,
     patience=8,
@@ -132,13 +184,34 @@ def make_memory_saver_config(
     config['training'].setdefault('threshold_min_delta', 0.000001)
     config['training'].setdefault('threshold_min_relative_delta', 0.01)
     config['training'].setdefault('threshold_save_loss_tolerance', 0.05)
-    config['training']['num_workers'] = 0
+    config['training']['num_workers'] = int(num_workers)
+    config.setdefault('data', {})['window_stride'] = int(config['data'].get('window_stride', 64))
     config.setdefault('threshold', {})
     config['threshold'].setdefault('selection_policy', 'recall_fpr_tradeoff')
     config['threshold'].setdefault('target_recall', 0.99)
     config['threshold'].setdefault('max_validation_fpr', 0.25)
     config['threshold'].setdefault('fbeta_beta', 3.0)
     config['threshold'].setdefault('enforce_validation_recall', False)
+    config['threshold']['adaptive_window_size'] = config['threshold'].get('adaptive_window_size', 'auto')
+    config['threshold'].setdefault('adaptive_window_fraction', 0.10)
+    config['threshold'].setdefault('adaptive_window_min', 30)
+    config['threshold'].setdefault('adaptive_window_max', 200)
+    config['threshold'].setdefault('adaptive_method', 'robust_mad')
+    config['threshold'].setdefault('adaptive_min_scale', 1e-6)
+    config['threshold'].setdefault('adaptive_warmup_trim_percentile', 95)
+    config['threshold'].setdefault('adaptive_calibrate_k', dataset_name != 'loghub2')
+    config['threshold'].setdefault('adaptive_k_grid', [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0])
+    if dataset_name == 'loghub2':
+        config['threshold']['adaptive_k'] = 4.0
+        config['threshold']['adaptive_calibrate_k'] = False
+    else:
+        config['threshold']['adaptive_k'] = float(config['threshold'].get('adaptive_k', 2.0))
+    config['threshold']['adaptive_min_window'] = int(config['threshold'].get('adaptive_min_window', 20))
+    config.setdefault('multi_scale', {})
+    config['multi_scale'].setdefault('enabled', True)
+    config['multi_scale'].setdefault('lengths', [64, 128, 256])
+    config['multi_scale'].setdefault('aggregation', 'max')
+    config['multi_scale'].setdefault('normalize', 'robust_z_train')
     config.setdefault('evaluation', {})['max_localization_samples'] = int(max_localization_samples)
     config['evaluation'].setdefault('use_synthetic_validation_when_no_anomalies', True)
     config.setdefault('xai', {})['save_attention_matrices'] = 0
@@ -208,6 +281,51 @@ def load_training_histories_many(output_dirs):
     return histories
 
 
+def config_audit_table(dataset_states):
+    rows = []
+    for dataset_name, state in dataset_states.items():
+        config_path = state.get('used_config_path') if Path(state.get('used_config_path', '')).exists() else state.get('notebook_config_path')
+        if not config_path or not Path(config_path).exists():
+            rows.append({'dataset': dataset_name, 'status': 'missing_config'})
+            continue
+        config = load_config(config_path)
+        raw_dir = Path(config['data']['raw_dir'])
+        if not raw_dir.is_absolute():
+            raw_dir = PROJECT_ROOT / raw_dir
+        rows.append({
+            'dataset': dataset_name,
+            'status': 'ok',
+            'config_path': str(config_path),
+            'raw_dir': str(raw_dir),
+            'splits_dir': config['data'].get('splits_dir'),
+            'output_dir': config.get('project', {}).get('output_dir'),
+            'vocab_size': config.get('model', {}).get('vocab_size'),
+            'd_model': config.get('model', {}).get('d_model'),
+            'tcn_layers': config.get('model', {}).get('tcn_layers'),
+            'transformer_layers': config.get('model', {}).get('transformer_layers'),
+            'nhead': config.get('model', {}).get('nhead'),
+            'dim_feedforward': config.get('model', {}).get('dim_feedforward'),
+            'dropout': config.get('model', {}).get('dropout'),
+            'max_seq_len': config.get('data', {}).get('max_seq_len'),
+            'window_stride': config.get('data', {}).get('window_stride'),
+            'batch_size': config.get('training', {}).get('batch_size'),
+            'epochs': config.get('training', {}).get('epochs'),
+            'learning_rate': config.get('training', {}).get('learning_rate'),
+            'weight_decay': config.get('training', {}).get('weight_decay'),
+            'patience': config.get('training', {}).get('patience'),
+            'device': config.get('training', {}).get('device'),
+            'num_workers': config.get('training', {}).get('num_workers'),
+            'threshold_policy': config.get('threshold', {}).get('selection_policy'),
+            'adaptive_method': config.get('threshold', {}).get('adaptive_method'),
+            'adaptive_k': config.get('threshold', {}).get('adaptive_k'),
+            'ensemble_enabled': config.get('ensemble', {}).get('enabled'),
+            'ensemble_seeds': config.get('ensemble', {}).get('member_seeds'),
+            'evaluation_models': config.get('evaluation', {}).get('models'),
+            'loghub_gold_labels': str(raw_dir / 'anomaly_label.csv') if dataset_name == 'loghub2' and (raw_dir / 'anomaly_label.csv').exists() else '',
+        })
+    return pd.DataFrame(rows)
+
+
 def split_label_summary(dataset_states):
     rows = []
     for dataset_name, state in dataset_states.items():
@@ -231,12 +349,97 @@ def split_label_summary(dataset_states):
             anomaly = sum(x == 1 for x in labels)
             rows.append({
                 'dataset': dataset_name,
+                'source': 'synthetic' if split in {'val_synthetic', 'test_synthetic'} else 'real',
                 'split': split,
                 'normal': normal,
                 'anomaly': anomaly,
                 'total': len(labels) if labels else len(payload.get('sequences', [])),
                 'status': 'ok',
             })
+    df = pd.DataFrame(rows)
+    if not df.empty and 'total' in df:
+        df['normal_pct'] = (df['normal'] / df['total'].replace({0: pd.NA}) * 100).round(2)
+        df['anomaly_pct'] = (df['anomaly'] / df['total'].replace({0: pd.NA}) * 100).round(2)
+    return df
+
+
+def detailed_label_summary(dataset_states):
+    split_df = split_label_summary(dataset_states)
+    if split_df.empty:
+        return split_df
+    rows = []
+    for dataset_name, group in split_df.groupby('dataset', sort=False):
+        ok = group[group.get('status', 'ok').eq('ok')] if 'status' in group else group
+        rows.extend(ok.to_dict('records'))
+        for source, source_group in ok.groupby('source', sort=False):
+            rows.append({
+                'dataset': dataset_name,
+                'source': source,
+                'split': f'{source}_total',
+                'normal': int(source_group['normal'].sum()),
+                'anomaly': int(source_group['anomaly'].sum()),
+                'total': int(source_group['total'].sum()),
+                'status': 'total',
+            })
+        rows.append({
+            'dataset': dataset_name,
+            'source': 'real+synthetic',
+            'split': 'dataset_total',
+            'normal': int(ok['normal'].sum()),
+            'anomaly': int(ok['anomaly'].sum()),
+            'total': int(ok['total'].sum()),
+            'status': 'total',
+        })
+    all_ok = split_df[split_df.get('status', 'ok').eq('ok')] if 'status' in split_df else split_df
+    rows.append({
+        'dataset': 'ALL',
+        'source': 'real+synthetic',
+        'split': 'all_total',
+        'normal': int(all_ok['normal'].sum()),
+        'anomaly': int(all_ok['anomaly'].sum()),
+        'total': int(all_ok['total'].sum()),
+        'status': 'total',
+    })
+    df = pd.DataFrame(rows)
+    df['normal_pct'] = (df['normal'] / df['total'].replace({0: pd.NA}) * 100).round(2)
+    df['anomaly_pct'] = (df['anomaly'] / df['total'].replace({0: pd.NA}) * 100).round(2)
+    return df[['dataset', 'source', 'split', 'normal', 'anomaly', 'total', 'normal_pct', 'anomaly_pct', 'status']]
+
+
+def expected_detection_counts(dataset_states):
+    split_df = split_label_summary(dataset_states)
+    if split_df.empty:
+        return split_df
+    rows = []
+    for dataset_name, group in split_df.groupby('dataset', sort=False):
+        ok = group[group.get('status', 'ok').eq('ok') if 'status' in group else group.index == group.index]
+
+        def counts(split):
+            part = ok[ok['split'] == split]
+            if part.empty:
+                return 0, 0, 0
+            row = part.iloc[0]
+            return int(row['normal']), int(row['anomaly']), int(row['total'])
+
+        train_n, train_a, train_t = counts('train')
+        val_n, val_a, val_t = counts('val')
+        test_n, test_a, test_t = counts('test')
+        vsy_n, vsy_a, vsy_t = counts('val_synthetic')
+        sy_n, sy_a, sy_t = counts('test_synthetic')
+        rows.append({
+            'dataset': dataset_name,
+            'train_normal_for_ae': train_n,
+            'train_anomaly_excluded': train_a,
+            'val_should_detect_anomaly': val_a,
+            'val_normal': val_n,
+            'test_should_detect_anomaly': test_a,
+            'test_normal': test_n,
+            'real_should_detect_anomaly_val_test': val_a + test_a,
+            'real_normal_val_test': val_n + test_n,
+            'synthetic_should_detect_anomaly': vsy_a + sy_a,
+            'synthetic_normal': vsy_n + sy_n,
+            'real_total': train_t + val_t + test_t,
+        })
     return pd.DataFrame(rows)
 
 

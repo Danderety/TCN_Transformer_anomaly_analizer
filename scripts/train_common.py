@@ -12,6 +12,7 @@ from src.models.factory import build_model
 from src.training.trainer import Trainer
 from src.training.checkpointing import save_checkpoint
 from src.evaluation.scoring import score_dataset
+from src.evaluation.multiscale import score_payload_multiscale
 from src.evaluation.thresholds import select_validation_safe_threshold
 
 
@@ -44,9 +45,13 @@ def _history_path(output_dir, model_name, checkpoint_path=None):
     return Path(output_dir) / 'metrics' / f'{model_name}_training_history.csv'
 
 
-def _monitor_validation_metrics(model, train_loader, val_loader, val_labels, config, model_name, device):
-    train_scores = score_dataset(model, train_loader, device, config['data']['pad_id'], include_details=False)['scores']
-    val_scores = score_dataset(model, val_loader, device, config['data']['pad_id'], include_details=False)['scores']
+def _monitor_validation_metrics(model, train_loader, val_loader, val_labels, config, model_name, device, train_payload=None, val_payload=None):
+    if config.get('multi_scale', {}).get('enabled', False) and train_payload is not None and val_payload is not None:
+        train_scores = score_payload_multiscale(model, train_payload, train_payload, config, device)['scores']
+        val_scores = score_payload_multiscale(model, val_payload, train_payload, config, device)['scores']
+    else:
+        train_scores = score_dataset(model, train_loader, device, config['data']['pad_id'], include_details=False)['scores']
+        val_scores = score_dataset(model, val_loader, device, config['data']['pad_id'], include_details=False)['scores']
     return select_validation_safe_threshold(
         train_scores,
         val_scores,
@@ -66,6 +71,15 @@ def _threshold_changed(current, previous, min_delta, min_relative_delta):
     return delta >= float(min_delta) or (delta / scale) >= float(min_relative_delta)
 
 
+def _detection_score(metrics, target_recall):
+    recall = float(metrics.get('recall') or 0.0)
+    f1 = float(metrics.get('f1') or 0.0)
+    fpr = float(metrics.get('false_positive_rate') or 0.0)
+    fn = float(metrics.get('fn') or 0.0)
+    recall_penalty = max(0.0, float(target_recall) - recall) * 10.0
+    return f1 + recall - fpr - fn - recall_penalty
+
+
 def train_model_from_config(config, model_name, checkpoint_path=None):
     device=torch.device(config['training']['device'] if torch.cuda.is_available() else 'cpu')
     tr=load_json(f"{config['data']['splits_dir']}/train.json"); va=load_json(f"{config['data']['splits_dir']}/val.json")
@@ -83,7 +97,9 @@ def train_model_from_config(config, model_name, checkpoint_path=None):
     ensure_dir(f'{output_dir}/metrics')
     best=float('inf'); patience=0; ckpt=checkpoint_path or f'{output_dir}/models/{model_name}_best.pt'
     best_checkpoint_score=float('inf')
+    best_detection_score=float('-inf')
     last_threshold=None
+    last_threshold_info=None
     history=[]; history_path=_history_path(output_dir, model_name, checkpoint_path)
     monitor_detection=bool(config['training'].get('monitor_detection_metrics', True))
     compact_log=_notebook_display_enabled(config)
@@ -94,10 +110,15 @@ def train_model_from_config(config, model_name, checkpoint_path=None):
     threshold_min_delta=float(config['training'].get('threshold_min_delta', 1e-6))
     threshold_min_relative_delta=float(config['training'].get('threshold_min_relative_delta', 0.01))
     threshold_save_loss_tolerance=float(config['training'].get('threshold_save_loss_tolerance', 0.05))
+    threshold_monitor_interval=max(1, int(config['training'].get('threshold_monitor_interval', 5)))
+    threshold_resets_patience=bool(config['training'].get('threshold_resets_patience', False))
+    detection_min_delta=float(config['training'].get('detection_min_delta', 1e-4))
+    target_recall=float(config.get('threshold', {}).get('target_recall', 0.99))
     n_params=sum(p.numel() for p in model.parameters())
     log_lines=[(
         f'{model_name}: start training | epochs={total_epochs} patience={max_patience} '
-        f'threshold_patience={threshold_patience} batch_size={config["training"]["batch_size"]} '
+        f'threshold_patience={threshold_patience} threshold_monitor_interval={threshold_monitor_interval} '
+        f'batch_size={config["training"]["batch_size"]} '
         f'device={device} params={n_params:,} val_monitor={va_monitor_source} '
         f'best_checkpoint={ckpt}'
     )]
@@ -113,8 +134,10 @@ def train_model_from_config(config, model_name, checkpoint_path=None):
             'val_loss':vl,
             'stop_patience':stop_patience,
             'threshold_patience':threshold_patience,
+            'threshold_monitor_interval':threshold_monitor_interval,
             'best_val_loss_before_epoch':None if best == float('inf') else best,
             'best_checkpoint_score_before_epoch':None if best_checkpoint_score == float('inf') else best_checkpoint_score,
+            'best_detection_score_before_epoch':None if best_detection_score == float('-inf') else best_detection_score,
             'patience_before_epoch':patience,
             'learning_rate':opt.param_groups[0]['lr'],
             'checkpoint':str(ckpt),
@@ -123,11 +146,19 @@ def train_model_from_config(config, model_name, checkpoint_path=None):
         metric_text=''
         current_threshold=None
         threshold_moved=False
-        if monitor_detection and va.get('labels') is not None:
-            threshold_info=_monitor_validation_metrics(model,tr_eval_ld,va_monitor_ld,va_monitor['labels'],config,model_name,device)
+        detection_signal=False
+        detection_score=None
+        run_threshold_monitor = monitor_detection and va.get('labels') is not None and (
+            epoch == 1 or epoch % threshold_monitor_interval == 0 or patience >= max_patience - 1
+        )
+        if run_threshold_monitor:
+            threshold_info=_monitor_validation_metrics(model,tr_eval_ld,va_monitor_ld,va_monitor['labels'],config,model_name,device,tr,va_monitor)
+            last_threshold_info=threshold_info
             current_threshold=threshold_info['threshold']
             threshold_moved=_threshold_changed(current_threshold,last_threshold,threshold_min_delta,threshold_min_relative_delta)
             vm=threshold_info['metrics']
+            detection_score=_detection_score(vm,target_recall)
+            detection_signal=detection_score > best_detection_score + detection_min_delta
             row.update({
                 'val_precision':vm['precision'],
                 'val_recall':vm['recall'],
@@ -141,15 +172,25 @@ def train_model_from_config(config, model_name, checkpoint_path=None):
                 'threshold_type':threshold_info['threshold_type'],
                 'threshold_moved':threshold_moved,
                 'previous_threshold':last_threshold,
+                'detection_score':detection_score,
+                'detection_signal':detection_signal,
+                'threshold_monitor_ran':True,
             })
             metric_text=(
                 f' val_f1={vm["f1"]:.4f} val_recall={vm["recall"]:.4f} '
                 f'val_fp={vm["fp"]} val_fn={vm["fn"]} thr={threshold_info["threshold"]:.6g} '
-                f'thr_move={threshold_moved} safety={threshold_info["was_safety_applied"]}'
+                f'thr_move={threshold_moved} det_gain={detection_signal} safety={threshold_info["was_safety_applied"]}'
             )
+        else:
+            row.update({
+                'threshold_moved':False,
+                'detection_score':None,
+                'detection_signal':False,
+                'threshold_monitor_ran':False,
+            })
 
         loss_improved = vl < (best - loss_min_delta)
-        threshold_signal = bool(threshold_moved)
+        threshold_signal = bool(detection_signal)
         checkpoint_score = vl
         threshold_checkpoint = (
             threshold_signal
@@ -157,7 +198,7 @@ def train_model_from_config(config, model_name, checkpoint_path=None):
             and vl <= best * (1.0 + threshold_save_loss_tolerance)
         )
         should_save = loss_improved or threshold_checkpoint
-        should_reset_patience = loss_improved or threshold_signal
+        should_reset_patience = loss_improved or (threshold_signal and threshold_resets_patience)
 
         row.update({
             'loss_improved':loss_improved,
@@ -170,11 +211,15 @@ def train_model_from_config(config, model_name, checkpoint_path=None):
         if should_save:
             best=min(best,vl)
             best_checkpoint_score=min(best_checkpoint_score,checkpoint_score)
+            if detection_score is not None:
+                best_detection_score=max(best_detection_score,detection_score)
             patience=0 if should_reset_patience else patience
             row['is_best']=True; save_checkpoint(model,opt,epoch,row,config,ckpt)
-            status='BEST saved' if loss_improved else 'THRESHOLD saved'
+            status='BEST saved' if loss_improved else 'DETECTION saved'
         else:
             best=min(best,vl)
+            if detection_score is not None:
+                best_detection_score=max(best_detection_score,detection_score)
             if should_reset_patience:
                 patience=0; status=f'threshold still moving 0/{stop_patience}'
             else:
@@ -184,6 +229,7 @@ def train_model_from_config(config, model_name, checkpoint_path=None):
             last_threshold=current_threshold
         row['best_val_loss_after_epoch']=best
         row['best_checkpoint_score_after_epoch']=None if best_checkpoint_score == float('inf') else best_checkpoint_score
+        row['best_detection_score_after_epoch']=None if best_detection_score == float('-inf') else best_detection_score
         row['patience_after_epoch']=patience
         row['epoch_time_sec']=time.time()-started
         history.append(row)

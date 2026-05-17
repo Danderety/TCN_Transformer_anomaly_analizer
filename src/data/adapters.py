@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import pandas as pd
 
 class GenericDirectoryLogAdapter:
@@ -102,6 +103,40 @@ class LO2Adapter(GenericDirectoryLogAdapter):
         return pd.DataFrame(rows)
 
 class LoghubAdapter(GenericDirectoryLogAdapter):
+    block_pattern = re.compile(r'blk_-?\d+')
+
+    def _find_label_path(self):
+        candidates = []
+        for name in ['anomaly_label.csv', 'HDFS_anomaly_label.csv']:
+            candidates.append(self.raw_dir / name)
+            candidates.append(self.raw_dir / 'preprocessed' / name)
+        candidates.extend(self.raw_dir.rglob('anomaly_label.csv'))
+        for path in candidates:
+            if path.exists() and path.is_file():
+                return path
+        return None
+
+    def _load_block_labels(self, label_path):
+        labels = pd.read_csv(label_path)
+        if 'BlockId' in labels.columns:
+            block_col = 'BlockId'
+            label_cols = [c for c in labels.columns if c != block_col]
+            label_col = 'Label' if 'Label' in label_cols else label_cols[0]
+            raw = labels.set_index(block_col)[label_col]
+        else:
+            labels = pd.read_csv(label_path, index_col=0)
+            raw = labels.iloc[:, 0]
+        normalized = raw.astype(str).str.strip().str.lower()
+        mapped = normalized.map({'normal': 0, 'anomaly': 1, '0': 0, '1': 1})
+        if mapped.isna().any():
+            bad = sorted(normalized[mapped.isna()].unique().tolist())
+            raise ValueError(f'Unknown HDFS labels in {label_path}: {bad}')
+        return {str(k): int(v) for k, v in mapped.items()}
+
+    def _extract_block_id(self, text):
+        match = self.block_pattern.search(str(text))
+        return match.group(0) if match else None
+
     def load(self):
         structured = self.raw_dir / 'HDFS_full.log_structured.csv'
         if structured.exists():
@@ -110,10 +145,19 @@ class LoghubAdapter(GenericDirectoryLogAdapter):
                 read_kwargs['nrows'] = int(self.max_lines_per_file)
             df = pd.read_csv(structured, **read_kwargs)
             df = df.rename(columns={'LineId': 'timestamp', 'Content': 'raw_message'})
-            # HDFS_full here has no anomaly label file in the project tree, so it
-            # is treated as unlabeled/normal log stream for unsupervised training.
-            df['session_id'] = (df['timestamp'].astype(int) // 128).map(lambda x: f'hdfs_stream_{x}')
-            df['label'] = 0
+            label_path = self._find_label_path()
+            if label_path is not None:
+                labels = self._load_block_labels(label_path)
+                df['session_id'] = df['raw_message'].map(self._extract_block_id)
+                df = df[df['session_id'].isin(labels)].copy()
+                if df.empty:
+                    raise ValueError(f'No HDFS structured rows matched labels from {label_path}')
+                df['label'] = df['session_id'].map(labels).astype(int)
+            else:
+                # No gold label file is present, so keep the stream as unlabeled
+                # normal data for unsupervised training.
+                df['session_id'] = (df['timestamp'].astype(int) // 128).map(lambda x: f'hdfs_stream_{x}')
+                df['label'] = 0
             df['service'] = 'hdfs'
             df['source_file'] = str(structured)
             return df[['session_id', 'timestamp', 'raw_message', 'label', 'service', 'source_file']]

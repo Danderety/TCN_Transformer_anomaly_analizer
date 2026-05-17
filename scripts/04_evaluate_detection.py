@@ -14,6 +14,7 @@ from src.data.validation_split import combine_validation_with_synthetic_if_neede
 from src.models.factory import build_model
 from src.training.checkpointing import load_checkpoint
 from src.evaluation.scoring import score_dataset
+from src.evaluation.multiscale import score_payload_multiscale
 from src.evaluation.ensemble import combine_ensemble_scores
 from src.evaluation.thresholds import apply_threshold, select_validation_safe_threshold, threshold_for_exact_recall
 from src.evaluation.detection_metrics import compute_detection_metrics
@@ -25,6 +26,12 @@ def loader(data,c):
 def _score_single(c, model_name, checkpoint_path, train, val, test, device):
     model=build_model(model_name,c).to(device); model,_=load_checkpoint(model,checkpoint_path,device)
     try:
+        if c.get('multi_scale', {}).get('enabled', False):
+            return (
+                score_payload_multiscale(model,train,train,c,device),
+                score_payload_multiscale(model,val,train,c,device),
+                score_payload_multiscale(model,test,train,c,device),
+            )
         return (
             score_dataset(model,loader(train,c),device,c['data']['pad_id'],include_details=False),
             score_dataset(model,loader(val,c),device,c['data']['pad_id'],include_details=False),
@@ -49,6 +56,7 @@ def _metrics_row(model_name, train_scores, val_scores, val_labels, test_scores, 
     )
     pred=apply_threshold(test_scores,threshold_info['threshold'])
     metrics=compute_detection_metrics(test_labels,test_scores,pred)
+    metrics.update(_oracle_threshold_diagnostics(test_labels, test_scores))
     exact_info = None
     if c.get('threshold', {}).get('exact_recall_diagnostics', True) and sum(int(y) == 1 for y in test_labels) > 0:
         exact_threshold, exact_metrics, exact_note = threshold_for_exact_recall(test_labels, test_scores)
@@ -85,6 +93,52 @@ def _metrics_row(model_name, train_scores, val_scores, val_labels, test_scores, 
     })
     return metrics, pred, threshold_info, exact_info
 
+def _oracle_threshold_diagnostics(labels, scores):
+    y=np.asarray(labels,dtype=int)
+    s=np.asarray(scores,dtype=float)
+    s=np.nan_to_num(s,nan=np.inf,posinf=np.inf,neginf=-np.inf)
+    normal=s[y==0]
+    anomaly=s[y==1]
+    out={
+        'oracle_perfect_possible': None,
+        'oracle_perfect_threshold': None,
+        'oracle_best_f1': None,
+        'oracle_best_recall': None,
+        'oracle_best_specificity': None,
+        'oracle_best_fp': None,
+        'oracle_best_fn': None,
+        'oracle_best_threshold': None,
+    }
+    if len(normal)==0 or len(anomaly)==0 or len(s)==0:
+        return out
+    max_normal=float(np.max(normal))
+    min_anomaly=float(np.min(anomaly))
+    perfect=max_normal < min_anomaly
+    out['oracle_perfect_possible']=bool(perfect)
+    if perfect:
+        out['oracle_perfect_threshold']=float((max_normal + min_anomaly) / 2.0)
+    candidates=np.unique(s)
+    candidates=np.concatenate([[np.nextafter(float(candidates.min()), -np.inf)], candidates, [np.nextafter(float(candidates.max()), np.inf)]])
+    best=None
+    for threshold in candidates:
+        p=(s>=float(threshold)).astype(int).tolist()
+        m=compute_detection_metrics(y,s,p)
+        specificity=1.0 - m['false_positive_rate']
+        key=(m['f1'], m['recall'], specificity, -m['fp'], -m['fn'])
+        if best is None or key > best[0]:
+            best=(key, threshold, m, specificity)
+    if best:
+        _key, threshold, m, specificity=best
+        out.update({
+            'oracle_best_f1':m['f1'],
+            'oracle_best_recall':m['recall'],
+            'oracle_best_specificity':specificity,
+            'oracle_best_fp':m['fp'],
+            'oracle_best_fn':m['fn'],
+            'oracle_best_threshold':float(threshold),
+        })
+    return out
+
 def _exact_info_if_needed(labels, scores, c):
     if c.get('threshold', {}).get('exact_recall_diagnostics', True) and sum(int(y) == 1 for y in labels) > 0:
         exact_threshold, exact_metrics, exact_note = threshold_for_exact_recall(labels, scores)
@@ -112,6 +166,9 @@ def _save_predictions(output_dir, model_name, split_name, scores, labels, pred, 
 def _score_synthetic_one(c, model_name, checkpoint_path, synthetic, device):
     model=build_model(model_name,c).to(device); model,_=load_checkpoint(model,checkpoint_path,device)
     try:
+        if c.get('multi_scale', {}).get('enabled', False):
+            train=load_json(f"{c['data']['splits_dir']}/train.json")
+            return score_payload_multiscale(model,synthetic,train,c,device)
         return score_dataset(model,loader(synthetic,c),device,c['data']['pad_id'],include_details=False)
     finally:
         del model
