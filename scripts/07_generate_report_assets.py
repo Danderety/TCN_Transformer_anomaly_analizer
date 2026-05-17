@@ -11,6 +11,7 @@ from src.utils.io import load_json, ensure_dir
 from src.visualization.plots import (
     plot_aggregate_token_heatmap,
     plot_confusion_matrix_counts,
+    plot_confusion_matrix_grid,
     plot_score_distribution,
     plot_threshold_dynamics,
     plot_heatmap,
@@ -52,16 +53,37 @@ def main(config_path):
     final=pd.concat([x for x in [det,ad] if not x.empty], ignore_index=True) if (not det.empty or not ad.empty) else pd.DataFrame()
     if not final.empty:
         final.to_csv(f'{output_dir}/metrics/final_comparison.csv',index=False); plot_model_comparison(final,'f1',f'{output_dir}/figures/model_comparison_f1.png')
+    confusion_items=[]
     for pred_path in sorted((Path(output_dir)/'predictions').glob('*_test_predictions.json')):
         payload=load_json(pred_path)
         if 'labels' not in payload or 'predictions' not in payload:
             continue
         model_name, split_name = _prediction_name_parts(pred_path)
+        title=f'{split_name}: {model_name}'
+        confusion_items.append({'title': title, 'labels': payload['labels'], 'predictions': payload['predictions']})
         plot_confusion_matrix_counts(
             payload['labels'],
             payload['predictions'],
             f'Confusion matrix ({split_name}): {model_name}',
             f'{output_dir}/figures/confusion_matrix_{_safe_name(model_name)}_{split_name}.png'
+        )
+    adaptive_pred_path=Path(output_dir)/'predictions'/'adaptive_predictions.json'
+    if adaptive_pred_path.exists():
+        payload=load_json(adaptive_pred_path)
+        if 'labels' in payload and 'predictions' in payload:
+            title='real: adaptive_threshold'
+            confusion_items.append({'title': title, 'labels': payload['labels'], 'predictions': payload['predictions']})
+            plot_confusion_matrix_counts(
+                payload['labels'],
+                payload['predictions'],
+                'Confusion matrix (real): adaptive_threshold',
+                f'{output_dir}/figures/confusion_matrix_adaptive_threshold_real.png'
+            )
+    if confusion_items:
+        plot_confusion_matrix_grid(
+            confusion_items,
+            'Confusion matrices overview',
+            f'{output_dir}/figures/confusion_matrices_overview.png',
         )
     pred=Path(output_dir)/'predictions'/'tcn_transformer_ae_test_predictions.json'
     if pred.exists():
@@ -69,7 +91,10 @@ def main(config_path):
         plot_score_distribution(ns,ans,f'{output_dir}/figures/anomaly_score_distribution.png')
     ap=Path(output_dir)/'predictions'/'adaptive_predictions.json'
     if ap.exists():
-        a=load_json(ap); plot_threshold_dynamics(a['scores'],a['thresholds'],a['labels'],f'{output_dir}/figures/adaptive_threshold_dynamics.png')
+        a=load_json(ap)
+        plot_threshold_dynamics(a['scores'],a['thresholds'],a['labels'],f'{output_dir}/figures/adaptive_threshold_dynamics.png',y_mode='robust')
+        plot_threshold_dynamics(a['scores'],a['thresholds'],a['labels'],f'{output_dir}/figures/adaptive_threshold_dynamics_full_scale.png',y_mode='full')
+        plot_threshold_dynamics(a['scores'],a['thresholds'],a['labels'],f'{output_dir}/figures/adaptive_threshold_dynamics_symlog.png',y_mode='symlog')
     lp=Path(output_dir)/'predictions'/'tcn_transformer_ae_localization_predictions.json'
     if lp.exists():
         l=load_json(lp); count=0

@@ -186,6 +186,7 @@ def make_memory_saver_config(
     config['training'].setdefault('threshold_save_loss_tolerance', 0.05)
     config['training']['num_workers'] = int(num_workers)
     config.setdefault('data', {})['window_stride'] = int(config['data'].get('window_stride', 64))
+    config['data']['no_split'] = True
     config.setdefault('threshold', {})
     config['threshold'].setdefault('selection_policy', 'recall_fpr_tradeoff')
     config['threshold'].setdefault('target_recall', 0.99)
@@ -214,6 +215,7 @@ def make_memory_saver_config(
     config['multi_scale'].setdefault('normalize', 'robust_z_train')
     config.setdefault('evaluation', {})['max_localization_samples'] = int(max_localization_samples)
     config['evaluation'].setdefault('use_synthetic_validation_when_no_anomalies', True)
+    config['evaluation']['full_real_evaluation'] = True
     config.setdefault('xai', {})['save_attention_matrices'] = 0
     config.setdefault('notebook', {})['memory_saver'] = True
     tmp_dir = PROJECT_ROOT / 'outputs' / '_notebook_configs'
@@ -337,7 +339,7 @@ def split_label_summary(dataset_states):
         splits_dir = Path(config['data']['splits_dir'])
         if not splits_dir.is_absolute():
             splits_dir = PROJECT_ROOT / splits_dir
-        for split in ['train', 'val', 'val_synthetic', 'test', 'test_synthetic']:
+        for split in ['train', 'val', 'val_synthetic', 'test', 'test_synthetic', 'full_real']:
             path = splits_dir / f'{split}.json'
             if not path.exists():
                 rows.append({'dataset': dataset_name, 'split': split, 'normal': 0, 'anomaly': 0, 'total': 0, 'status': 'missing'})
@@ -349,7 +351,7 @@ def split_label_summary(dataset_states):
             anomaly = sum(x == 1 for x in labels)
             rows.append({
                 'dataset': dataset_name,
-                'source': 'synthetic' if split in {'val_synthetic', 'test_synthetic'} else 'real',
+                'source': 'synthetic' if split in {'val_synthetic', 'test_synthetic'} else ('real_full' if split == 'full_real' else 'real'),
                 'split': split,
                 'normal': normal,
                 'anomaly': anomaly,
@@ -358,9 +360,70 @@ def split_label_summary(dataset_states):
             })
     df = pd.DataFrame(rows)
     if not df.empty and 'total' in df:
-        df['normal_pct'] = (df['normal'] / df['total'].replace({0: pd.NA}) * 100).round(2)
-        df['anomaly_pct'] = (df['anomaly'] / df['total'].replace({0: pd.NA}) * 100).round(2)
+        denominator = df['total'].replace(0, float('nan'))
+        df['normal_pct'] = (df['normal'] / denominator * 100).round(2)
+        df['anomaly_pct'] = (df['anomaly'] / denominator * 100).round(2)
     return df
+
+
+def preparation_level_summary(dataset_states):
+    rows = []
+    for dataset_name, state in dataset_states.items():
+        config_path = state.get('used_config_path') or state.get('notebook_config_path')
+        if not config_path or not Path(config_path).exists():
+            rows.append({'dataset': dataset_name, 'level': 'missing_config', 'normal': 0, 'anomaly': 0, 'total': 0})
+            continue
+        config = load_config(config_path)
+        processed_dir = Path(config['data']['processed_dir'])
+        if not processed_dir.is_absolute():
+            processed_dir = PROJECT_ROOT / processed_dir
+        summary_path = processed_dir / 'prepare_summary.json'
+        if summary_path.exists():
+            with open(summary_path, 'r', encoding='utf-8') as f:
+                payload = json.load(f)
+            for item in payload.get('levels', []):
+                rows.append({
+                    'dataset': dataset_name,
+                    'level': item.get('level'),
+                    'normal': item.get('normal'),
+                    'anomaly': item.get('anomaly'),
+                    'total': item.get('total'),
+                    'description': item.get('description', ''),
+                    'status': 'ok',
+                })
+            continue
+        parsed_path = processed_dir / 'parsed_logs.csv'
+        if parsed_path.exists():
+            parsed = pd.read_csv(parsed_path, usecols=['session_id', 'label'])
+            rows.append({
+                'dataset': dataset_name,
+                'level': 'raw_rows',
+                'normal': int((parsed['label'] == 0).sum()),
+                'anomaly': int((parsed['label'] == 1).sum()),
+                'total': int(len(parsed)),
+                'description': 'original log/event rows before session aggregation',
+                'status': 'fallback_from_parsed_logs',
+            })
+            rows.append({
+                'dataset': dataset_name,
+                'level': 'raw_sessions',
+                'normal': None,
+                'anomaly': None,
+                'total': int(parsed['session_id'].nunique()),
+                'description': 'unique session_id values in parsed_logs.csv',
+                'status': 'fallback_from_parsed_logs',
+            })
+        else:
+            rows.append({
+                'dataset': dataset_name,
+                'level': 'missing_prepare_summary',
+                'normal': 0,
+                'anomaly': 0,
+                'total': 0,
+                'description': f'Run prepare_data to create {summary_path}',
+                'status': 'missing',
+            })
+    return pd.DataFrame(rows)
 
 
 def detailed_label_summary(dataset_states):
@@ -401,8 +464,9 @@ def detailed_label_summary(dataset_states):
         'status': 'total',
     })
     df = pd.DataFrame(rows)
-    df['normal_pct'] = (df['normal'] / df['total'].replace({0: pd.NA}) * 100).round(2)
-    df['anomaly_pct'] = (df['anomaly'] / df['total'].replace({0: pd.NA}) * 100).round(2)
+    denominator = df['total'].replace(0, float('nan'))
+    df['normal_pct'] = (df['normal'] / denominator * 100).round(2)
+    df['anomaly_pct'] = (df['anomaly'] / denominator * 100).round(2)
     return df[['dataset', 'source', 'split', 'normal', 'anomaly', 'total', 'normal_pct', 'anomaly_pct', 'status']]
 
 
@@ -426,6 +490,10 @@ def expected_detection_counts(dataset_states):
         test_n, test_a, test_t = counts('test')
         vsy_n, vsy_a, vsy_t = counts('val_synthetic')
         sy_n, sy_a, sy_t = counts('test_synthetic')
+        full_n, full_a, full_t = counts('full_real')
+        real_total = full_t if full_t else train_t + val_t + test_t
+        real_detection_n = full_n if full_t else val_n + test_n
+        real_detection_a = full_a if full_t else val_a + test_a
         rows.append({
             'dataset': dataset_name,
             'train_normal_for_ae': train_n,
@@ -434,11 +502,11 @@ def expected_detection_counts(dataset_states):
             'val_normal': val_n,
             'test_should_detect_anomaly': test_a,
             'test_normal': test_n,
-            'real_should_detect_anomaly_val_test': val_a + test_a,
-            'real_normal_val_test': val_n + test_n,
+            'real_should_detect_anomaly_val_test': real_detection_a,
+            'real_normal_val_test': real_detection_n,
             'synthetic_should_detect_anomaly': vsy_a + sy_a,
             'synthetic_normal': vsy_n + sy_n,
-            'real_total': train_t + val_t + test_t,
+            'real_total': real_total,
         })
     return pd.DataFrame(rows)
 
@@ -449,7 +517,8 @@ def real_vs_synthetic_label_summary(dataset_states):
         return split_df
     rows = []
     for dataset_name, group in split_df.groupby('dataset', sort=False):
-        real = group[group['split'].isin(['train', 'val', 'test'])]
+        full_real = group[(group['split'] == 'full_real') & (group.get('status', 'ok').eq('ok') if 'status' in group else True)]
+        real = full_real if not full_real.empty else group[group['split'].isin(['train', 'val', 'test'])]
         synthetic = group[group['split'].isin(['val_synthetic', 'test_synthetic'])]
         rows.append({
             'dataset': dataset_name,
@@ -468,30 +537,33 @@ def real_vs_synthetic_label_summary(dataset_states):
         rows.append({
             'dataset': dataset_name,
             'source': 'real+synthetic',
-            'normal': int(group['normal'].sum()),
-            'anomaly': int(group['anomaly'].sum()),
-            'total': int(group['total'].sum()),
+            'normal': int(real['normal'].sum() + synthetic['normal'].sum()),
+            'anomaly': int(real['anomaly'].sum() + synthetic['anomaly'].sum()),
+            'total': int(real['total'].sum() + synthetic['total'].sum()),
         })
+    full_real_all = split_df[(split_df['split'] == 'full_real') & (split_df.get('status', 'ok').eq('ok') if 'status' in split_df else True)]
+    real_all = full_real_all if not full_real_all.empty else split_df[split_df['split'].isin(['train', 'val', 'test'])]
+    synthetic_all = split_df[split_df['split'].isin(['val_synthetic', 'test_synthetic'])]
     rows.append({
         'dataset': 'ALL',
         'source': 'real',
-        'normal': int(split_df[split_df['split'].isin(['train', 'val', 'test'])]['normal'].sum()),
-        'anomaly': int(split_df[split_df['split'].isin(['train', 'val', 'test'])]['anomaly'].sum()),
-        'total': int(split_df[split_df['split'].isin(['train', 'val', 'test'])]['total'].sum()),
+        'normal': int(real_all['normal'].sum()),
+        'anomaly': int(real_all['anomaly'].sum()),
+        'total': int(real_all['total'].sum()),
     })
     rows.append({
         'dataset': 'ALL',
         'source': 'synthetic',
-        'normal': int(split_df[split_df['split'].isin(['val_synthetic', 'test_synthetic'])]['normal'].sum()),
-        'anomaly': int(split_df[split_df['split'].isin(['val_synthetic', 'test_synthetic'])]['anomaly'].sum()),
-        'total': int(split_df[split_df['split'].isin(['val_synthetic', 'test_synthetic'])]['total'].sum()),
+        'normal': int(synthetic_all['normal'].sum()),
+        'anomaly': int(synthetic_all['anomaly'].sum()),
+        'total': int(synthetic_all['total'].sum()),
     })
     rows.append({
         'dataset': 'ALL',
         'source': 'real+synthetic',
-        'normal': int(split_df['normal'].sum()),
-        'anomaly': int(split_df['anomaly'].sum()),
-        'total': int(split_df['total'].sum()),
+        'normal': int(real_all['normal'].sum() + synthetic_all['normal'].sum()),
+        'anomaly': int(real_all['anomaly'].sum() + synthetic_all['anomaly'].sum()),
+        'total': int(real_all['total'].sum() + synthetic_all['total'].sum()),
     })
     return pd.DataFrame(rows)
 

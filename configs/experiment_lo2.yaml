@@ -1,7 +1,7 @@
 project:
   name: interpretable_adaptive_tcn_transformer_ae
   seed: 42
-  output_dir: outputs
+  output_dir: outputs/lo2
 data:
   dataset_name: lo2
   raw_dir: data/raw/lo2
@@ -12,11 +12,13 @@ data:
   min_seq_len: 5
   max_runs_per_scenario: 20
   max_lines_per_file: 80
+  session_granularity: scenario
   pad_id: 0
   normal_label: 0
   anomaly_label: 1
   test_size: 0.2
   val_size: 0.2
+  no_split: true
 preprocessing:
   lowercase: false
   remove_timestamps: true
@@ -31,27 +33,27 @@ model:
   dropout: 0.1
 training:
   batch_size: 64
-  epochs: 1000
+  epochs: 300
   learning_rate: 0.0003
   weight_decay: 1.0e-05
   gradient_clip: 1.0
   patience: 8
-  loss_min_delta: 0.0
+  loss_min_delta: 1.0e-05
   threshold_patience: 9
   threshold_min_delta: 1.0e-06
   threshold_min_relative_delta: 0.01
   threshold_save_loss_tolerance: 0.05
   monitor_detection_metrics: true
   device: cuda
-  num_workers: 4
+  num_workers: 0
   threshold_monitor_interval: 5
   threshold_resets_patience: false
   detection_min_delta: 0.0001
 threshold:
   method: quantile
-  selection_policy: recall_fpr_tradeoff
+  selection_policy: raw
   fixed_percentile: 95
-  validation_safety_check: true
+  validation_safety_check: false
   target_recall: 0.99
   max_validation_fpr: 0.25
   fbeta_beta: 3.0
@@ -103,6 +105,7 @@ ensemble:
 synthetic_anomalies:
   anomaly_ratio: 0.5
 evaluation:
+  full_real_evaluation: true
   models:
   - tcn_ae
   - tcn_transformer_ae

@@ -45,9 +45,10 @@ class GenericDirectoryLogAdapter:
         return pd.DataFrame(rows)
 
 class LO2Adapter(GenericDirectoryLogAdapter):
-    def __init__(self, raw_dir, max_files=None, max_lines_per_file=None, max_runs_per_scenario=None, **kwargs):
+    def __init__(self, raw_dir, max_files=None, max_lines_per_file=None, max_runs_per_scenario=None, session_granularity='scenario', **kwargs):
         super().__init__(raw_dir, max_files=max_files, max_lines_per_file=max_lines_per_file)
         self.max_runs_per_scenario = max_runs_per_scenario
+        self.session_granularity = str(session_granularity or 'scenario').lower()
 
     def _parts(self, path):
         rel = path.relative_to(self.raw_dir)
@@ -80,10 +81,15 @@ class LO2Adapter(GenericDirectoryLogAdapter):
         if not files:
             raise FileNotFoundError(f'No .log files under {self.raw_dir}')
         rows = []
+        service_order = {}
         for fp in files:
             run_id, scenario, service = self._parts(fp)
             label = self._infer_label_from_path(fp)
-            session_id = f'{run_id}/{scenario}/{service}'
+            if self.session_granularity == 'service':
+                session_id = f'{run_id}/{scenario}/{service}'
+            else:
+                session_id = f'{run_id}/{scenario}'
+            service_rank = service_order.setdefault(service, len(service_order))
             with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
                 for i, line in enumerate(f):
                     if self.max_lines_per_file and i >= int(self.max_lines_per_file):
@@ -92,7 +98,7 @@ class LO2Adapter(GenericDirectoryLogAdapter):
                     if msg:
                         rows.append({
                             'session_id': session_id,
-                            'timestamp': i,
+                            'timestamp': i * 100 + service_rank,
                             'raw_message': msg,
                             'label': label,
                             'service': service,
@@ -215,12 +221,12 @@ class RCAEvalAdapter(GenericDirectoryLogAdapter):
                     })
         return pd.DataFrame(rows)
 
-def get_adapter(dataset_name, raw_dir, max_files=None, max_lines_per_file=None, max_runs_per_scenario=None):
+def get_adapter(dataset_name, raw_dir, max_files=None, max_lines_per_file=None, max_runs_per_scenario=None, session_granularity=None):
     name = dataset_name.lower()
     if name in ['demo', 'generic']:
         return GenericDirectoryLogAdapter(raw_dir, max_files=max_files, max_lines_per_file=max_lines_per_file)
     if name == 'lo2':
-        return LO2Adapter(raw_dir, max_files=max_files, max_lines_per_file=max_lines_per_file, max_runs_per_scenario=max_runs_per_scenario)
+        return LO2Adapter(raw_dir, max_files=max_files, max_lines_per_file=max_lines_per_file, max_runs_per_scenario=max_runs_per_scenario, session_granularity=session_granularity or 'scenario')
     if name in ['loghub', 'loghub2', 'loghub-2.0']:
         return LoghubAdapter(raw_dir, max_files=max_files, max_lines_per_file=max_lines_per_file)
     if name == 'rcaeval':
