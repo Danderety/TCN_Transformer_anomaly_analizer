@@ -1,16 +1,20 @@
 project:
-  name: interpretable_adaptive_tcn_transformer_ae
+  name: interpretable_adaptive_tcn_transformer_ae_loghub_observation_v2
   seed: 42
-  output_dir: outputs
+  output_dir: outputs/loghub2_observation_v2
 data:
-  dataset_name: rcaeval
-  raw_dir: data/raw/rcaeval
-  processed_dir: data/processed/rcaeval
-  splits_dir: data/splits/rcaeval
+  dataset_name: loghub2
+  raw_dir: data/raw/loghub2
+  processed_dir: data/processed/loghub2_observation_v2
+  splits_dir: data/splits/loghub2_observation_v2
   max_seq_len: 128
   window_stride: 64
   min_seq_len: 5
-  max_lines_per_file: 1000
+  loghub_use_official_event_id: true
+  loghub_block_features: true
+  loghub_chunk_size: 500000
+  loghub_transition_top_k: 32
+  loghub_rare_transition_max_count: 2
   pad_id: 0
   normal_label: 0
   anomaly_label: 1
@@ -23,34 +27,34 @@ preprocessing:
   remove_numbers: false
 model:
   vocab_size: null
-  d_model: 128
-  tcn_layers: 4
+  d_model: 96
+  tcn_layers: 3
   transformer_layers: 2
   nhead: 4
-  dim_feedforward: 256
+  dim_feedforward: 192
   dropout: 0.1
 training:
-  batch_size: 64
+  batch_size: 128
   epochs: 1000
   learning_rate: 0.0003
   weight_decay: 1.0e-05
   gradient_clip: 1.0
   patience: 8
-  loss_min_delta: 0.0
+  loss_min_delta: 1.0e-05
   threshold_patience: 9
   threshold_min_delta: 1.0e-06
   threshold_min_relative_delta: 0.01
   threshold_save_loss_tolerance: 0.05
   monitor_detection_metrics: true
   device: cuda
-  num_workers: 4
+  num_workers: 0
   threshold_monitor_interval: 5
   threshold_resets_patience: false
   detection_min_delta: 0.0001
 threshold:
   method: quantile
   selection_policy: raw
-  fixed_percentile: 95
+  fixed_percentile: 99
   validation_safety_check: false
   target_recall: 0.99
   max_validation_fpr: 0.25
@@ -60,15 +64,14 @@ threshold:
   spot_init_quantile: 98
   spot_risk: 0.0001
   spot_min_excess: 20
-  spot_for_models:
-  - tcn_transformer_ae_ensemble
+  spot_for_models: []
   adaptive_window_size: auto
   adaptive_window_fraction: 0.1
   adaptive_window_min: 30
   adaptive_window_max: 200
   adaptive_method: robust_mad
-  adaptive_k: 2.0
-  adaptive_calibrate_k: true
+  adaptive_k: 4.0
+  adaptive_calibrate_k: false
   adaptive_k_grid:
   - 0.5
   - 1.0
@@ -90,11 +93,10 @@ multi_scale:
   lengths:
   - 64
   - 128
-  - 256
   aggregation: max
   normalize: robust_z_train
 ensemble:
-  enabled: true
+  enabled: false
   member_seeds:
   - 42
   - 43
@@ -106,8 +108,6 @@ evaluation:
   full_real_evaluation: true
   models:
   - tcn_ae
-  - tcn_transformer_ae
-  - tcn_transformer_ae_ensemble
   use_synthetic_validation_when_no_anomalies: true
   top_k:
   - 1

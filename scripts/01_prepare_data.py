@@ -28,6 +28,21 @@ def main(config_path):
         max_lines_per_file=c['data'].get('max_lines_per_file') or c['data'].get('max_raw_rows'),
         max_runs_per_scenario=c['data'].get('max_runs_per_scenario'),
         session_granularity=c['data'].get('session_granularity'),
+        loghub_use_official_event_id=c['data'].get('loghub_use_official_event_id', False),
+        loghub_block_features=c['data'].get('loghub_block_features', False),
+        loghub_max_blocks=c['data'].get('loghub_max_blocks'),
+        loghub_max_normal_blocks=c['data'].get('loghub_max_normal_blocks'),
+        loghub_max_anomaly_blocks=c['data'].get('loghub_max_anomaly_blocks'),
+        loghub_chunk_size=c['data'].get('loghub_chunk_size', 500000),
+        loghub_rare_transition_max_count=c['data'].get('loghub_rare_transition_max_count', 2),
+        loghub_transition_top_k=c['data'].get('loghub_transition_top_k', 32),
+        rcaeval_window_size=c['data'].get('rcaeval_window_size', 128),
+        rcaeval_top_k=c['data'].get('rcaeval_top_k', 8),
+        rcaeval_abnormal_z=c['data'].get('rcaeval_abnormal_z', 2.0),
+        rcaeval_sparse_events=c['data'].get('rcaeval_sparse_events', False),
+        rcaeval_row_features=c['data'].get('rcaeval_row_features', True),
+        rcaeval_window_features=c['data'].get('rcaeval_window_features', False),
+        rcaeval_max_metric_tokens_per_row=c['data'].get('rcaeval_max_metric_tokens_per_row', 16),
     ).load()
     if df.empty:
         raise ValueError('Adapter returned an empty dataframe. Check raw_dir and adapter settings.')

@@ -176,6 +176,7 @@ def make_memory_saver_config(
     config_path = make_notebook_config(config_path, dataset_name=dataset_name, output_dir=output_dir)
     config = load_config(config_path)
     dataset_name = dataset_name or config['data']['dataset_name']
+    data_dataset_name = str(config.get('data', {}).get('dataset_name', dataset_name)).lower()
     config.setdefault('training', {})['batch_size'] = int(batch_size)
     config['training']['epochs'] = int(epochs)
     config['training']['patience'] = int(patience)
@@ -189,6 +190,9 @@ def make_memory_saver_config(
     config['data']['no_split'] = True
     config.setdefault('threshold', {})
     config['threshold'].setdefault('selection_policy', 'recall_fpr_tradeoff')
+    if data_dataset_name in {'loghub2', 'rcaeval'}:
+        config['threshold']['selection_policy'] = 'raw'
+        config['threshold']['validation_safety_check'] = False
     config['threshold'].setdefault('target_recall', 0.99)
     config['threshold'].setdefault('max_validation_fpr', 0.25)
     config['threshold'].setdefault('fbeta_beta', 3.0)
@@ -200,9 +204,9 @@ def make_memory_saver_config(
     config['threshold'].setdefault('adaptive_method', 'robust_mad')
     config['threshold'].setdefault('adaptive_min_scale', 1e-6)
     config['threshold'].setdefault('adaptive_warmup_trim_percentile', 95)
-    config['threshold'].setdefault('adaptive_calibrate_k', dataset_name != 'loghub2')
+    config['threshold'].setdefault('adaptive_calibrate_k', data_dataset_name != 'loghub2')
     config['threshold'].setdefault('adaptive_k_grid', [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0])
-    if dataset_name == 'loghub2':
+    if data_dataset_name == 'loghub2':
         config['threshold']['adaptive_k'] = 4.0
         config['threshold']['adaptive_calibrate_k'] = False
     else:
@@ -291,6 +295,7 @@ def config_audit_table(dataset_states):
             rows.append({'dataset': dataset_name, 'status': 'missing_config'})
             continue
         config = load_config(config_path)
+        data_dataset_name = str(config.get('data', {}).get('dataset_name', dataset_name)).lower()
         raw_dir = Path(config['data']['raw_dir'])
         if not raw_dir.is_absolute():
             raw_dir = PROJECT_ROOT / raw_dir
@@ -318,12 +323,13 @@ def config_audit_table(dataset_states):
             'device': config.get('training', {}).get('device'),
             'num_workers': config.get('training', {}).get('num_workers'),
             'threshold_policy': config.get('threshold', {}).get('selection_policy'),
+            'validation_safety_check': config.get('threshold', {}).get('validation_safety_check'),
             'adaptive_method': config.get('threshold', {}).get('adaptive_method'),
             'adaptive_k': config.get('threshold', {}).get('adaptive_k'),
             'ensemble_enabled': config.get('ensemble', {}).get('enabled'),
             'ensemble_seeds': config.get('ensemble', {}).get('member_seeds'),
             'evaluation_models': config.get('evaluation', {}).get('models'),
-            'loghub_gold_labels': str(raw_dir / 'anomaly_label.csv') if dataset_name == 'loghub2' and (raw_dir / 'anomaly_label.csv').exists() else '',
+            'loghub_gold_labels': str(raw_dir / 'anomaly_label.csv') if data_dataset_name == 'loghub2' and (raw_dir / 'anomaly_label.csv').exists() else '',
         })
     return pd.DataFrame(rows)
 

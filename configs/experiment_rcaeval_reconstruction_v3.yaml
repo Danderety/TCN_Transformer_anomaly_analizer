@@ -1,16 +1,22 @@
 project:
-  name: interpretable_adaptive_tcn_transformer_ae
+  name: interpretable_adaptive_tcn_transformer_ae_rcaeval_reconstruction_v3
   seed: 42
-  output_dir: outputs
+  output_dir: outputs/rcaeval_reconstruction_v3
 data:
   dataset_name: rcaeval
   raw_dir: data/raw/rcaeval
-  processed_dir: data/processed/rcaeval
-  splits_dir: data/splits/rcaeval
+  processed_dir: data/processed/rcaeval_reconstruction_v3
+  splits_dir: data/splits/rcaeval_reconstruction_v3
   max_seq_len: 128
   window_stride: 64
   min_seq_len: 5
-  max_lines_per_file: 1000
+  rcaeval_window_size: 32
+  rcaeval_top_k: 8
+  rcaeval_abnormal_z: 2.0
+  rcaeval_sparse_events: true
+  rcaeval_row_features: true
+  rcaeval_window_features: true
+  rcaeval_max_metric_tokens_per_row: 24
   pad_id: 0
   normal_label: 0
   anomaly_label: 1
@@ -31,26 +37,26 @@ model:
   dropout: 0.1
 training:
   batch_size: 64
-  epochs: 1000
+  epochs: 300
   learning_rate: 0.0003
   weight_decay: 1.0e-05
   gradient_clip: 1.0
   patience: 8
-  loss_min_delta: 0.0
+  loss_min_delta: 1.0e-05
   threshold_patience: 9
   threshold_min_delta: 1.0e-06
   threshold_min_relative_delta: 0.01
   threshold_save_loss_tolerance: 0.05
   monitor_detection_metrics: true
   device: cuda
-  num_workers: 4
+  num_workers: 0
   threshold_monitor_interval: 5
   threshold_resets_patience: false
   detection_min_delta: 0.0001
 threshold:
   method: quantile
   selection_policy: raw
-  fixed_percentile: 95
+  fixed_percentile: 99
   validation_safety_check: false
   target_recall: 0.99
   max_validation_fpr: 0.25
@@ -94,7 +100,7 @@ multi_scale:
   aggregation: max
   normalize: robust_z_train
 ensemble:
-  enabled: true
+  enabled: false
   member_seeds:
   - 42
   - 43
@@ -106,8 +112,6 @@ evaluation:
   full_real_evaluation: true
   models:
   - tcn_ae
-  - tcn_transformer_ae
-  - tcn_transformer_ae_ensemble
   use_synthetic_validation_when_no_anomalies: true
   top_k:
   - 1
