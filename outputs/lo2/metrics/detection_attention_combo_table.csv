@@ -1,0 +1,8 @@
+dataset,method,model_family,threshold_kind,normal_total,anomaly_total,TN,FP,FN,TP,precision,recall,f1,attention/localization,threshold,adaptive_k,spot_note
+lo2,tcn_ae + spot what-if,tcn_ae,spot,180,9479,74,106,24,9455,0.9889132935885367,0.9974680873509864,0.993172268907563,-,0.0032791967736557114,,spot_fallback_quantile
+lo2,tcn_ae + quantile,tcn_ae,quantile,180,9479,171,9,138,9341,0.9990374331550802,0.9854415022681716,0.9921928939401986,-,4.609182286262508,,
+lo2,tcn_transformer_ae_ensemble + spot,tcn_transformer_ae_ensemble,spot,180,9479,176,4,337,9142,0.999562650338946,0.964447726553434,0.9816912751677852,"attention top1=1.000, top3=1.000, mean_rank=1.000",2.4827061605453475,,
+lo2,tcn_transformer_ae + quantile,tcn_transformer_ae,quantile,180,9479,171,9,334,9145,0.999016823246668,0.9647642156345606,0.9815917994955188,"attention top1=1.000, top3=1.000, mean_rank=1.000",2.0980747103691084,,
+lo2,tcn_transformer_ae_ensemble + adaptive(k=5) what-if,tcn_transformer_ae_ensemble,adaptive,180,9479,169,11,333,9146,0.9987987332095664,0.9648697119949362,0.9815411032410388,"attention top1=1.000, top3=1.000, mean_rank=1.000",dynamic,5.0,
+lo2,tcn_transformer_ae + adaptive,tcn_transformer_ae,adaptive,180,9479,35,145,258,9221,0.9845184710655562,0.9727819390231036,0.9786150172459538,"attention top1=1.000, top3=1.000, mean_rank=1.000",dynamic,0.5,
+lo2,tcn_transformer_ae + spot what-if,tcn_transformer_ae,spot,180,9479,55,125,297,9182,0.9865692489524014,0.9686675809684566,0.9775364633237518,"attention top1=1.000, top3=1.000, mean_rank=1.000",0.0032541114697232838,,spot_fallback_quantile

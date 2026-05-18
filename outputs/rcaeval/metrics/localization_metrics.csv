@@ -1,0 +1,5 @@
+top_1_hit,iou_at_1,top_3_hit,iou_at_3,top_5_hit,iou_at_5,mean_rank,model,xai_method,localization_source,ensemble_members,ensemble_seeds
+0.0,0.0,0.0,0.0,0.0,0.0,0.0,tcn_ae,reconstruction_error_heatmap,real_test,,
+0.0,0.0,0.0,0.0,0.0,0.0,0.0,tcn_transformer_ae,reconstruction_error_heatmap,real_test,,
+0.0,0.0,0.0,0.0,0.0,0.0,0.0,tcn_transformer_ae,transformer_attention_received,real_test,,
+0.0,0.0,0.0,0.0,0.0,0.0,0.0,tcn_transformer_ae_ensemble,ensemble_transformer_attention_received,real_test,3.0,42 43 44
