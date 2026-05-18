@@ -73,9 +73,23 @@ def make_loader(data,c):
     ds=LogSequenceDataset(data['sequences'],data.get('labels'),max_len=c['data']['max_seq_len'],pad_id=c['data']['pad_id'],session_ids=data.get('session_ids'))
     return DataLoader(ds,batch_size=c['training']['batch_size'],shuffle=False,num_workers=c['training'].get('num_workers',0))
 
+def _adaptive_model_name(c):
+    explicit = c.get('threshold', {}).get('adaptive_model')
+    if explicit:
+        return str(explicit)
+    models = [str(x) for x in c.get('evaluation', {}).get('models', []) if str(x) != 'tcn_transformer_ae_ensemble']
+    if 'tcn_transformer_ae' in models:
+        return 'tcn_transformer_ae'
+    if models:
+        return models[0]
+    return 'tcn_transformer_ae'
+
 def main(config_path):
-    c=load_config(config_path); output_dir=c.get('project', {}).get('output_dir', 'outputs'); ensure_dir(f'{output_dir}/metrics'); ensure_dir(f'{output_dir}/predictions'); mn='tcn_transformer_ae'; ck=Path(output_dir)/'models'/f'{mn}_best.pt'
-    if not ck.exists(): raise FileNotFoundError(ck)
+    c=load_config(config_path); output_dir=c.get('project', {}).get('output_dir', 'outputs'); ensure_dir(f'{output_dir}/metrics'); ensure_dir(f'{output_dir}/predictions'); mn=_adaptive_model_name(c); ck=Path(output_dir)/'models'/f'{mn}_best.pt'
+    if not ck.exists():
+        print(f'Skip adaptive threshold for {mn}: missing {ck}')
+        pd.DataFrame([]).to_csv(f'{output_dir}/metrics/adaptive_threshold_metrics.csv',index=False)
+        return None
     device=torch.device(c['training']['device'] if torch.cuda.is_available() else 'cpu')
     tr=load_json(f"{c['data']['splits_dir']}/train.json"); va=load_json(f"{c['data']['splits_dir']}/val.json"); va, val_source=combine_validation_with_synthetic_if_needed(c, va); te=load_json(f"{c['data']['splits_dir']}/test.json")
     model=build_model(mn,c).to(device); model,_=load_checkpoint(model,ck,device)

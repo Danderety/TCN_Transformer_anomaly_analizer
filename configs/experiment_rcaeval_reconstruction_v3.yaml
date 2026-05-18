@@ -56,7 +56,7 @@ training:
 threshold:
   method: quantile
   selection_policy: raw
-  fixed_percentile: 99
+  fixed_percentile: 65
   validation_safety_check: false
   target_recall: 0.99
   max_validation_fpr: 0.25
@@ -73,6 +73,8 @@ threshold:
   adaptive_window_min: 30
   adaptive_window_max: 200
   adaptive_method: robust_mad
+  adaptive_quantile: 99
+  adaptive_model: tcn_ae
   adaptive_k: 2.0
   adaptive_calibrate_k: true
   adaptive_k_grid:
@@ -100,7 +102,7 @@ multi_scale:
   aggregation: max
   normalize: robust_z_train
 ensemble:
-  enabled: false
+  enabled: true
   member_seeds:
   - 42
   - 43
@@ -112,6 +114,8 @@ evaluation:
   full_real_evaluation: true
   models:
   - tcn_ae
+  - tcn_transformer_ae
+  - tcn_transformer_ae_ensemble
   use_synthetic_validation_when_no_anomalies: true
   top_k:
   - 1

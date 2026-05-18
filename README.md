@@ -1,40 +1,175 @@
-# Interpretable Adaptive TCN-Transformer Autoencoder for Log Anomaly Detection
+# TCN / TCN-Transformer Autoencoder для обнаружения аномалий в логах
 
-Каркас проекта для темы:
+Проект реализует полный экспериментальный pipeline для обнаружения, оценки и частичной локализации аномалий в логах и метриках микросервисных/инфраструктурных систем.
 
-> Интерпретируемая адаптивная TCN-Transformer Autoencoder модель для обнаружения и локализации аномалий в системных логах.
+Основная идея: обучать автоэнкодер только на нормальных последовательностях событий, а затем считать ошибку реконструкции. Чем хуже модель восстанавливает последовательность, тем выше anomaly score.
 
-Проект закрывает полный pipeline:
+Проект поддерживает несколько вариантов модели:
 
-```text
-raw logs -> templates -> EventID sequences -> TCN-AE baseline
-         -> TCN-Transformer-AE -> anomaly score
-         -> fixed/adaptive threshold -> XAI heatmap
-         -> detection/localization metrics -> saved outputs
+- `tcn_ae` - базовый TCN Autoencoder.
+- `tcn_transformer_ae` - TCN Autoencoder с Transformer attention-блоком.
+- `tcn_transformer_ae_ensemble` - ансамбль нескольких TCN-Transformer AE с разными seed.
+- `adaptive_threshold` - отдельная пороговая стратегия поверх anomaly score.
+
+## Краткий Итог
+
+На текущих экспериментах reconstruction-подход работает хорошо, если правильно собрать объект наблюдения:
+
+- для LO2 объектом является сценарий/сессия сервиса;
+- для Loghub/HDFS объектом должен быть цельный `BlockId`, а не первые N строк лога;
+- для RCAEval числовые метрики превращаются в sparse pseudo-log события, чтобы автоэнкодер решал именно задачу реконструкции.
+
+Текущие лучшие результаты:
+
+| Dataset | Лучший метод | Precision | Recall | F1 | FP | FN | Комментарий |
+|---|---:|---:|---:|---:|---:|---:|---|
+| LO2 | `tcn_ae + quantile` | 0.999 | 0.985 | 0.992 | 9 | 138 | Сильный результат, но датасет сильно перекошен в сторону аномалий |
+| Loghub2 observation v2 | `tcn_ae + quantile` | 0.992 | 0.995 | 0.994 | 127 | 85 | Лучший и наиболее стабильный результат |
+| RCAEval reconstruction v3 | `tcn_transformer_ae + quantile` | 0.913 | 0.973 | 0.942 | 3161 | 924 | После настройки порога F1 поднялся выше 0.94 |
+
+Если смотреть на среднюю устойчивость по всем трём датасетам, лучший основной кандидат сейчас - `tcn_ae`: он чуть стабильнее, проще и не требует ансамбля. Если смотреть только RCAEval, там выигрывает `tcn_transformer_ae`.
+
+## Архитектура Pipeline
+
+```mermaid
+flowchart LR
+    A[Raw logs / metrics] --> B[Dataset adapter]
+    B --> C[Cleaning + template parser]
+    C --> D[Event vocabulary]
+    D --> E[EventID sequences]
+    E --> F[Train: normal only]
+    F --> G1[TCN-AE]
+    F --> G2[TCN-Transformer-AE]
+    F --> G3[Transformer ensemble]
+    G1 --> H[Reconstruction error]
+    G2 --> H
+    G3 --> H
+    H --> I[Threshold: quantile / SPOT / adaptive]
+    I --> J[Detection metrics]
+    H --> K[XAI heatmap / attention]
+    K --> L[Localization metrics]
 ```
 
-## 1. Что внутри
+## Архитектура Моделей
 
-```text
-configs/                 YAML-конфиги экспериментов
-src/data/                adapters, preprocessing, vocab, dataset
-src/models/              TCN-AE и TCN-Transformer-AE
-src/training/            loss, trainer, checkpoints
-src/evaluation/          scoring, thresholds, metrics
-src/xai/                 heatmap и gradient saliency
-src/visualization/       графики
-scripts/                 этапы запуска
-notebooks/               notebook-first запуск экспериментов
-outputs/                 модели, метрики, предсказания, графики
-main.py                  полный pipeline
+### TCN Autoencoder
+
+```mermaid
+flowchart LR
+    A[Event IDs] --> B[Embedding]
+    B --> C[Temporal Conv blocks]
+    C --> D[Latent sequence representation]
+    D --> E[Decoder]
+    E --> F[Reconstructed Event IDs]
+    F --> G[Token reconstruction error]
 ```
 
-## 2. Установка
+`tcn_ae` является главным baseline. Он быстрый, устойчивый и в текущих результатах выигрывает на LO2 и Loghub2.
+
+### TCN-Transformer Autoencoder
+
+```mermaid
+flowchart LR
+    A[Event IDs] --> B[Embedding]
+    B --> C[TCN encoder]
+    C --> D[Transformer encoder]
+    D --> E[Temporal decoder]
+    E --> F[Reconstructed Event IDs]
+    D --> G[Attention maps]
+    F --> H[Reconstruction score]
+```
+
+`tcn_transformer_ae` добавляет attention-механизм. Он полезен для анализа последовательных зависимостей и сейчас даёт лучший F1 на RCAEval.
+
+### Ensemble + SPOT
+
+```mermaid
+flowchart LR
+    A[Input sequence] --> B1[Transformer AE seed 42]
+    A --> B2[Transformer AE seed 43]
+    A --> B3[Transformer AE seed 44]
+    B1 --> C[Score normalization]
+    B2 --> C
+    B3 --> C
+    C --> D[Mean ensemble score]
+    D --> E[SPOT / POT threshold]
+    E --> F[Prediction]
+```
+
+Ансамбль нужен для проверки устойчивости результата. На текущих данных он не всегда выигрывает по F1: например, на RCAEval ensemble + SPOT слишком консервативен и ловит мало аномалий.
+
+## Датасеты
+
+| Dataset | Raw path | Active config | Output path | Статус |
+|---|---|---|---|---|
+| LO2 | `data/raw/lo2` | `configs/experiment_lo2.yaml` | `outputs/lo2` | Исторический сильный baseline, сейчас исключён из активной тетрадки |
+| Loghub2 / HDFS | `data/raw/loghub2` | `configs/experiment_loghub_observation_v2.yaml` | `outputs/loghub2_observation_v2` | Активный улучшенный вариант |
+| RCAEval | `data/raw/rcaeval` | `configs/experiment_rcaeval_reconstruction_v3.yaml` | `outputs/rcaeval_reconstruction_v3` | Активный reconstruction-friendly вариант |
+
+### LO2
+
+LO2 хорошо подходит для демонстрации reconstruction-подхода, но распределение классов там необычное: аномальных сессий намного больше, чем нормальных. Поэтому LO2 полезен как отдельный тест, но не должен быть единственной опорой для выводов.
+
+### Loghub2 Observation v2
+
+Первичный Loghub/HDFS нельзя нормально решать через первые N строк общего потока. Для HDFS естественный объект наблюдения - `BlockId`.
+
+В `loghub2_observation_v2` используется:
+
+- официальный `EventId` из `HDFS_full.log_structured.csv`;
+- цельные `BlockId`-сессии;
+- block-level признаки:
+  - длина блока;
+  - первое и последнее событие;
+  - гистограмма событий;
+  - пары переходов;
+  - редкие переходы;
+- бюджет данных через цельные блоки:
+
+```yaml
+loghub_row_budget: 600000
+loghub_block_complete_budget: true
+loghub_budget_balance_labels: true
+loghub_budget_anomaly_fraction: 0.5
+```
+
+Это означает: берём около 600k строк, но не разрезаем блоки пополам.
+
+### RCAEval Reconstruction v3
+
+RCAEval содержит числовые метрики. Чтобы не уходить в отдельный metric-baseline, метрики переводятся в pseudo-log события:
+
+- `row_severity_*`
+- `row_abnormal_count_*`
+- `row_dominant_type_*`
+- `row_dominant_trend_*`
+- `window_max_severity_*`
+- `window_abnormal_rows_*`
+- metric-level tokens с типом, направлением и трендом.
+
+Так автоэнкодер остаётся автоэнкодером: он реконструирует последовательности дискретных событий, а не запускает отдельный числовой детектор.
+
+## Активная Тетрадка
+
+Основной notebook:
+
+```text
+notebooks/04_final_results.ipynb
+```
+
+Сейчас активные датасеты:
+
+```python
+DATASETS = ['loghub2_observation_v2', 'rcaeval_reconstruction_v3']
+```
+
+LO2 остаётся в проекте, но не запускается в активной тетрадке по умолчанию.
+
+## Установка
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate      # Linux/macOS
-# .venv\Scripts\Activate.ps1  # Windows PowerShell
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -44,231 +179,270 @@ pip install -r requirements.txt
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
-Если CUDA недоступна, код запустится на CPU. Для реальной работы лучше установить PyTorch под твою версию CUDA.
-
-## 3. Быстрый запуск на demo-данных
-
-```bash
-python main.py --config configs/experiment_demo.yaml --generate_demo
-```
-
-Это создаст toy-логи, обучит baseline и основную модель, посчитает метрики и сохранит графики.
-
-## 4. Запуск на LO2
-
-Ссылки на данные также продублированы в `data/README.md`:
-
-| Dataset | Куда распаковать | Source |
-|---|---|---|
-| LO2 | `data/raw/lo2/` | https://doi.org/10.5281/zenodo.14265858 |
-| Loghub-2.0 | `data/raw/loghub2/` | https://zenodo.org/records/8275861 |
-| RCAEval | `data/raw/rcaeval/` | https://github.com/phamquiluan/RCAEval |
-
-1. Распакуй LO2 в:
-
-```text
-data/raw/lo2/
-```
-
-2. Подготовь данные:
-
-```bash
-python scripts/01_prepare_data.py --config configs/experiment_lo2.yaml
-```
-
-3. Используй generated config, потому что туда записывается `vocab_size`:
-
-```bash
-python main.py --config data/processed/lo2/used_config.yaml
-```
-
-Аналогично для Loghub-2.0 и RCAEval:
-
-```bash
-python scripts/01_prepare_data.py --config configs/experiment_loghub.yaml
-python main.py --config data/processed/loghub2/used_config.yaml
-```
-
-```bash
-python scripts/01_prepare_data.py --config configs/experiment_rcaeval.yaml
-python main.py --config data/processed/rcaeval/used_config.yaml
-```
-
-## 5. Что надо адаптировать под реальные датасеты
-
-Главное место:
-
-```text
-src/data/adapters.py
-```
-
-Сейчас adapter рекурсивно читает `.log`, `.txt`, `.out` и определяет label по пути:
-
-```text
-error / fault / anomaly / abnormal / failure / fail -> 1
-иначе -> 0
-```
-
-Для строгой работы нужно уточнить:
-
-```text
-session_id  — что считать одной последовательностью логов
-label       — где в датасете хранится normal/anomaly
-service     — компонент/сервис
- timestamp  — правильный порядок событий
-```
-
-Это нормальная dataset-specific часть. Модель, scoring, XAI и метрики остаются общими.
-
-## 6. Отдельный запуск этапов
-
-```bash
-python scripts/01_prepare_data.py --config configs/experiment_lo2.yaml
-python scripts/02_train_baseline_tcn_ae.py --config data/processed/lo2/used_config.yaml
-python scripts/03_train_tcn_transformer_ae.py --config data/processed/lo2/used_config.yaml
-python scripts/08_train_tcn_transformer_ensemble.py --config data/processed/lo2/used_config.yaml
-python scripts/04_evaluate_detection.py --config data/processed/lo2/used_config.yaml
-python scripts/05_evaluate_localization.py --config data/processed/lo2/used_config.yaml
-python scripts/06_evaluate_adaptive_threshold.py --config data/processed/lo2/used_config.yaml
-python scripts/07_generate_report_assets.py --config data/processed/lo2/used_config.yaml
-```
-
-## 6.1 Запуск через Jupyter
-
-Открывай:
-
-```text
-notebooks/04_final_results.ipynb
-```
-
-Тетрадка не дублирует код проекта: она вызывает stage-функции из
-`src/utils/notebook_workflow.py`, которые ссылаются на `scripts/` и `src/`.
-Графики также не пишутся в notebook: они создаются через
-`scripts/07_generate_report_assets.py`, а реализация лежит в
-`src/visualization/plots.py`.
-
-Для TCN-Transformer ensemble используются:
-
-```text
-scripts/08_train_tcn_transformer_ensemble.py
-src/evaluation/ensemble.py
-src/evaluation/thresholds.py
-```
-
-Пороговая политика:
-
-```text
-member scores -> robust-z по train scores -> mean ensemble score
-             -> SPOT/POT raw threshold
-             -> validation safety-check: final=min(raw, validation recall-lock)
-```
-
-Это правило закреплено в конфиге через `ensemble.*`, `threshold.spot_for_models`
-и `threshold.validation_safety_check`.
-
-## 7. Куда смотреть результаты
-
-```text
-outputs/models/
-  tcn_ae_best.pt
-  tcn_transformer_ae_best.pt
-  tcn_transformer_ae_seed*_best.pt
-
-outputs/metrics/
-  detection_metrics.csv
-  localization_metrics.csv
-  adaptive_threshold_metrics.csv
-  final_comparison.csv
-
-outputs/predictions/
-  tcn_ae_test_predictions.json
-  tcn_transformer_ae_test_predictions.json
-  tcn_transformer_ae_ensemble_test_predictions.json
-  tcn_transformer_ae_localization_predictions.json
-  adaptive_predictions.json
-
-outputs/figures/
-  anomaly_score_distribution.png
-  adaptive_threshold_dynamics.png
-  model_comparison_f1.png
-  heatmap_example_*.png
-
-outputs/reports/
-  summary.md
-```
-
-## 8. Как интерпретировать результаты
-
-### Detection
-
-`outputs/metrics/detection_metrics.csv`:
-
-- `precision` — сколько найденных аномалий действительно аномальны;
-- `recall` — сколько реальных аномалий найдено;
-- `f1` — баланс precision и recall;
-- `pr_auc` — качество ранжирования по anomaly score;
-- `false_positive_rate` — доля ложных срабатываний.
-
-### Localization
-
-`outputs/metrics/localization_metrics.csv`:
-
-- `top_1_hit` — попала ли самая подозрительная позиция в истинную аномалию;
-- `top_3_hit` — попала ли одна из top-3 позиций;
-- `mean_rank` — средний ранг истинной аномальной позиции;
-- `iou_at_k` — пересечение top-k подозрительных позиций с истинной маской.
-
-### XAI heatmap
-
-Heatmap строится по ошибке восстановления каждой позиции:
-
-```text
-ошибка восстановления позиции = вклад позиции в anomaly score
-```
-
-Это корректно формулировать так:
-
-> модель локализует наиболее подозрительный участок логовой последовательности, давший наибольший вклад в anomaly score.
-
-Не стоит писать, что модель гарантированно нашла истинную причину сбоя.
-
-## 9. Если не хватает VRAM
-
-В конфиге уменьши:
+Если CUDA доступна, обучение идёт на GPU:
 
 ```yaml
 training:
-  batch_size: 16
-
-model:
-  d_model: 64
-  transformer_layers: 1
+  device: cuda
 ```
 
-## 10. Типовые ошибки
+## Запуск По Шагам
 
-### `model.vocab_size is None`
+### 1. Подготовка данных
 
-Ты запустил train script на исходном конфиге. Нужно сначала выполнить подготовку данных и использовать `used_config.yaml`.
+```bash
+python scripts/01_prepare_data.py --config configs/experiment_loghub_observation_v2.yaml
+python scripts/01_prepare_data.py --config configs/experiment_rcaeval_reconstruction_v3.yaml
+```
 
-### `No normal train sequences`
+После подготовки появляется `used_config.yaml`, где уже записан правильный `vocab_size`.
 
-Adapter неправильно определил label. Проверь `data/processed/<dataset>/parsed_logs.csv`.
+### 2. Обучение моделей
 
-### Слишком мало sequences
+```bash
+python scripts/02_train_baseline_tcn_ae.py --config data/processed/loghub2_observation_v2/used_config.yaml
+python scripts/03_train_tcn_transformer_ae.py --config data/processed/loghub2_observation_v2/used_config.yaml
+python scripts/08_train_tcn_transformer_ensemble.py --config data/processed/loghub2_observation_v2/used_config.yaml
+```
 
-Проверь `session_id` в adapter или уменьши:
+Аналогично для RCAEval:
+
+```bash
+python scripts/02_train_baseline_tcn_ae.py --config data/processed/rcaeval_reconstruction_v3/used_config.yaml
+python scripts/03_train_tcn_transformer_ae.py --config data/processed/rcaeval_reconstruction_v3/used_config.yaml
+python scripts/08_train_tcn_transformer_ensemble.py --config data/processed/rcaeval_reconstruction_v3/used_config.yaml
+```
+
+### 3. Оценка
+
+```bash
+python scripts/04_evaluate_detection.py --config data/processed/loghub2_observation_v2/used_config.yaml
+python scripts/05_evaluate_localization.py --config data/processed/loghub2_observation_v2/used_config.yaml
+python scripts/06_evaluate_adaptive_threshold.py --config data/processed/loghub2_observation_v2/used_config.yaml
+python scripts/07_generate_report_assets.py --config data/processed/loghub2_observation_v2/used_config.yaml
+```
+
+### 4. Sweep порогов
+
+Для подбора quantile-порога:
+
+```bash
+python scripts/09_threshold_sweep.py \
+  --config data/processed/rcaeval_reconstruction_v3/used_config.yaml \
+  --models tcn_ae \
+  --percentiles 99,98,97,95,90,85,80,75,70,65,60
+```
+
+Именно так был найден рабочий `q65` для RCAEval.
+
+## Важные Конфиги
+
+### Loghub2 observation v2
 
 ```yaml
 data:
-  min_seq_len: 2
+  loghub_row_budget: 600000
+  loghub_block_complete_budget: true
+  loghub_budget_balance_labels: true
+  loghub_use_official_event_id: true
+  loghub_block_features: true
+  vocab_train_normal_only: true
+
+threshold:
+  fixed_percentile: 99
+  adaptive_model: tcn_ae
+  spot_for_models:
+  - tcn_transformer_ae_ensemble
 ```
 
-## 11. Эксперименты для научной работы
+### RCAEval reconstruction v3
 
-| Эксперимент | Что показывает |
-|---|---|
-| TCN-AE vs TCN-Transformer-AE | полезность Transformer-блока |
-| Fixed vs Adaptive threshold | влияние адаптивного порога |
-| Synthetic anomaly localization | способность heatmap подсвечивать внесённый участок |
-| Score distribution | разделимость normal/anomaly по anomaly score |
+```yaml
+data:
+  rcaeval_window_size: 32
+  rcaeval_sparse_events: true
+  rcaeval_window_features: true
+  rcaeval_abnormal_z: 2.0
+
+threshold:
+  fixed_percentile: 65
+  adaptive_quantile: 99
+  adaptive_model: tcn_ae
+  spot_for_models:
+  - tcn_transformer_ae_ensemble
+```
+
+## Результаты
+
+### Detection
+
+| Dataset | Model | Threshold | Precision | Recall | F1 | PR-AUC | ROC-AUC | TN | FP | FN | TP |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| LO2 | `tcn_ae` | quantile | 0.999 | 0.985 | 0.992 | 0.9999 | 0.995 | 171 | 9 | 138 | 9341 |
+| LO2 | `tcn_transformer_ae` | quantile | 0.999 | 0.965 | 0.982 | 0.9994 | 0.969 | 171 | 9 | 334 | 9145 |
+| LO2 | `tcn_transformer_ae_ensemble` | SPOT | 1.000 | 0.964 | 0.982 | 0.9994 | 0.970 | 176 | 4 | 337 | 9142 |
+| Loghub2 v2 | `tcn_ae` | quantile | 0.992 | 0.995 | 0.994 | 0.9993 | 0.9988 | 12489 | 127 | 85 | 16774 |
+| Loghub2 v2 | `tcn_transformer_ae` | quantile | 0.992 | 0.992 | 0.992 | 0.9992 | 0.9986 | 12489 | 127 | 132 | 16727 |
+| Loghub2 v2 | `tcn_transformer_ae_ensemble` | SPOT | 1.000 | 0.951 | 0.975 | 0.9991 | 0.9985 | 12614 | 2 | 834 | 16025 |
+| RCAEval v3 | `tcn_ae` | quantile | 0.911 | 0.951 | 0.930 | 0.9852 | 0.9478 | 5871 | 3161 | 1684 | 32368 |
+| RCAEval v3 | `tcn_transformer_ae` | quantile | 0.913 | 0.973 | 0.942 | 0.9839 | 0.9458 | 5871 | 3161 | 924 | 33128 |
+| RCAEval v3 | `tcn_transformer_ae_ensemble` | SPOT | 1.000 | 0.305 | 0.468 | 0.9839 | 0.9457 | 9029 | 3 | 23655 | 10397 |
+
+### Adaptive Threshold
+
+| Dataset | Model | Precision | Recall | F1 | FP | FN | Вывод |
+|---|---|---:|---:|---:|---:|---:|---|
+| LO2 | `tcn_transformer_ae` | 0.985 | 0.973 | 0.979 | 145 | 258 | Работает, но хуже лучшего quantile |
+| Loghub2 v2 | `tcn_ae` | 0.833 | 0.998 | 0.908 | 3370 | 29 | Очень высокий recall, но много FP |
+| RCAEval v3 | `tcn_ae` | 0.805 | 0.997 | 0.891 | 8216 | 89 | Слишком агрессивен, основной результат лучше брать quantile |
+
+## Графики
+
+Некоторые уже сгенерированные артефакты:
+
+### Loghub2 v2
+
+![Loghub2 model comparison](outputs/loghub2_observation_v2/figures/model_comparison_f1.png)
+
+![Loghub2 confusion matrices](outputs/loghub2_observation_v2/figures/confusion_matrices_overview.png)
+
+![Loghub2 score distribution](outputs/loghub2_observation_v2/figures/anomaly_score_distribution.png)
+
+### RCAEval v3
+
+![RCAEval model comparison](outputs/rcaeval_reconstruction_v3/figures/model_comparison_f1.png)
+
+![RCAEval confusion matrices](outputs/rcaeval_reconstruction_v3/figures/confusion_matrices_overview.png)
+
+![RCAEval score distribution](outputs/rcaeval_reconstruction_v3/figures/anomaly_score_distribution.png)
+
+## Интерпретация Метрик
+
+### Detection
+
+- `precision` - сколько найденных аномалий действительно являются аномалиями.
+- `recall` - сколько реальных аномалий было найдено.
+- `f1` - баланс precision и recall.
+- `PR-AUC` - качество ранжирования при сильном дисбалансе классов.
+- `ROC-AUC` - общая разделимость normal/anomaly score.
+- `FP` - нормальные объекты, ошибочно помеченные как аномалии.
+- `FN` - пропущенные аномалии.
+
+### Localization
+
+Локализация строится по reconstruction error heatmap:
+
+```text
+position score = вклад токена/позиции в ошибку реконструкции
+```
+
+Метрики:
+
+- `top_1_hit` - попала ли самая подозрительная позиция в истинную аномальную маску;
+- `top_3_hit` и `top_5_hit` - то же самое для top-k позиций;
+- `iou_at_k` - пересечение top-k подозрительных позиций с истинной маской;
+- `mean_rank` - средний ранг истинной аномальной позиции.
+
+Важно: heatmap показывает участок, давший высокий reconstruction error. Это интерпретируемая подсказка, а не строгая гарантия root cause.
+
+## Структура Проекта
+
+```text
+configs/
+  experiment_loghub_observation_v2.yaml
+  experiment_rcaeval_reconstruction_v3.yaml
+  experiment_lo2.yaml
+
+src/
+  data/
+    adapters.py              dataset-specific loading
+    preprocessing.py          cleaning + template parser
+    vocab.py                  EventID vocabulary
+    sequence_builder.py       sessions/windows
+  models/
+    tcn_ae.py
+    tcn_transformer_ae.py
+    factory.py
+  training/
+    trainer.py
+    checkpointing.py
+  evaluation/
+    thresholds.py
+    detection_metrics.py
+    multiscale.py
+    ensemble.py
+  visualization/
+    plots.py
+  utils/
+    notebook_workflow.py
+
+scripts/
+  01_prepare_data.py
+  02_train_baseline_tcn_ae.py
+  03_train_tcn_transformer_ae.py
+  04_evaluate_detection.py
+  05_evaluate_localization.py
+  06_evaluate_adaptive_threshold.py
+  07_generate_report_assets.py
+  08_train_tcn_transformer_ensemble.py
+  09_threshold_sweep.py
+  10_token_score_sweep.py
+
+notebooks/
+  04_final_results.ipynb
+
+outputs/
+  <dataset>/models/
+  <dataset>/metrics/
+  <dataset>/predictions/
+  <dataset>/figures/
+  <dataset>/reports/
+```
+
+## Типовые Проблемы
+
+### `model.vocab_size is None`
+
+Train script запущен на исходном config. Сначала нужно выполнить:
+
+```bash
+python scripts/01_prepare_data.py --config configs/<config>.yaml
+```
+
+А затем использовать:
+
+```text
+data/processed/<dataset>/used_config.yaml
+```
+
+### `size mismatch for embedding.weight`
+
+Checkpoint был обучен на старом vocabulary. Нужно переобучить модель после новой подготовки данных или удалить старый checkpoint.
+
+Типичный пример:
+
+```text
+checkpoint vocab = 384
+current vocab = 166
+```
+
+Это не ошибка PyTorch-модели, а несовпадение подготовленных данных и сохранённого checkpoint.
+
+### Jupyter зависает на `evaluate_detection`
+
+Раньше `oracle_threshold_diagnostics` перебирал thresholds квадратично. Сейчас он ускорен через сортировку. Если kernel всё ещё выполняет старую версию кода, нужно сделать `Restart Kernel`.
+
+### Adaptive threshold даёт много FP
+
+Adaptive threshold оптимизирует динамическую чувствительность. На Loghub2 и RCAEval он часто резко повышает recall, но платит большим числом FP. Основной результат лучше брать из `detection_metrics.csv`, а adaptive показывать как отдельный эксперимент.
+
+## Главные Выводы
+
+1. Reconstruction AE работает, если правильно определить объект наблюдения.
+2. Для HDFS/Loghub правильный объект - цельный `BlockId`.
+3. Для RCAEval нужно переводить метрики в sparse pseudo-events, иначе автоэнкодер получает шумную последовательность.
+4. `tcn_ae` является самым стабильным базовым методом.
+5. `tcn_transformer_ae` полезен на RCAEval и может давать лучший recall/F1.
+6. `tcn_transformer_ae_ensemble + SPOT` слишком консервативен на RCAEval: precision почти идеальный, но recall низкий.
+7. Adaptive threshold полезен как отдельная демонстрация динамического порога, но не всегда лучший по F1.
+

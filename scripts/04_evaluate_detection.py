@@ -117,26 +117,32 @@ def _oracle_threshold_diagnostics(labels, scores):
     out['oracle_perfect_possible']=bool(perfect)
     if perfect:
         out['oracle_perfect_threshold']=float((max_normal + min_anomaly) / 2.0)
-    candidates=np.unique(s)
-    candidates=np.concatenate([[np.nextafter(float(candidates.min()), -np.inf)], candidates, [np.nextafter(float(candidates.max()), np.inf)]])
-    best=None
-    for threshold in candidates:
-        p=(s>=float(threshold)).astype(int).tolist()
-        m=compute_detection_metrics(y,s,p)
-        specificity=1.0 - m['false_positive_rate']
-        key=(m['f1'], m['recall'], specificity, -m['fp'], -m['fn'])
-        if best is None or key > best[0]:
-            best=(key, threshold, m, specificity)
-    if best:
-        _key, threshold, m, specificity=best
-        out.update({
-            'oracle_best_f1':m['f1'],
-            'oracle_best_recall':m['recall'],
-            'oracle_best_specificity':specificity,
-            'oracle_best_fp':m['fp'],
-            'oracle_best_fn':m['fn'],
-            'oracle_best_threshold':float(threshold),
-        })
+    order=np.argsort(-s, kind='mergesort')
+    sorted_scores=s[order]
+    sorted_y=y[order]
+    group_end=np.r_[np.flatnonzero(sorted_scores[1:] != sorted_scores[:-1]), len(sorted_scores)-1]
+    tp_cum=np.cumsum(sorted_y == 1)[group_end].astype(float)
+    fp_cum=np.cumsum(sorted_y == 0)[group_end].astype(float)
+    positives=float(np.sum(y == 1))
+    negatives=float(np.sum(y == 0))
+    fn=positives-tp_cum
+    tn=negatives-fp_cum
+    precision=np.divide(tp_cum, tp_cum+fp_cum, out=np.zeros_like(tp_cum), where=(tp_cum+fp_cum)>0)
+    recall=np.divide(tp_cum, positives, out=np.zeros_like(tp_cum), where=positives>0)
+    specificity=np.divide(tn, negatives, out=np.zeros_like(tn), where=negatives>0)
+    f1=np.divide(2*precision*recall, precision+recall, out=np.zeros_like(precision), where=(precision+recall)>0)
+    best_idx=max(
+        range(len(group_end)),
+        key=lambda i: (float(f1[i]), float(recall[i]), float(specificity[i]), -int(fp_cum[i]), -int(fn[i])),
+    )
+    out.update({
+        'oracle_best_f1':float(f1[best_idx]),
+        'oracle_best_recall':float(recall[best_idx]),
+        'oracle_best_specificity':float(specificity[best_idx]),
+        'oracle_best_fp':int(fp_cum[best_idx]),
+        'oracle_best_fn':int(fn[best_idx]),
+        'oracle_best_threshold':float(sorted_scores[group_end[best_idx]]),
+    })
     return out
 
 def _exact_info_if_needed(labels, scores, c):

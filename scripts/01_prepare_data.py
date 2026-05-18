@@ -36,6 +36,10 @@ def main(config_path):
         loghub_chunk_size=c['data'].get('loghub_chunk_size', 500000),
         loghub_rare_transition_max_count=c['data'].get('loghub_rare_transition_max_count', 2),
         loghub_transition_top_k=c['data'].get('loghub_transition_top_k', 32),
+        loghub_row_budget=c['data'].get('loghub_row_budget'),
+        loghub_block_complete_budget=c['data'].get('loghub_block_complete_budget', False),
+        loghub_budget_balance_labels=c['data'].get('loghub_budget_balance_labels', True),
+        loghub_budget_anomaly_fraction=c['data'].get('loghub_budget_anomaly_fraction', 0.5),
         rcaeval_window_size=c['data'].get('rcaeval_window_size', 128),
         rcaeval_top_k=c['data'].get('rcaeval_top_k', 8),
         rcaeval_abnormal_z=c['data'].get('rcaeval_abnormal_z', 2.0),
@@ -50,8 +54,15 @@ def main(config_path):
     print('Cleaning messages and building event templates...', flush=True)
     df['clean_message']=df['raw_message'].apply(lambda x: clean_log_message(x, c['preprocessing']['lowercase'], c['preprocessing']['remove_timestamps'], c['preprocessing']['remove_numbers']))
     df['template']=df['clean_message'].apply(simple_template_parser)
-    vocab=EventVocab(); vocab.build(df['template'].tolist()); df['event_id']=df['template'].apply(vocab.encode)
-    print(f"Built vocab_size={len(vocab):,}; building sequences...", flush=True)
+    vocab_templates = df['template'].tolist()
+    if c['data'].get('vocab_train_normal_only', False):
+        normal_templates = df.loc[df['label'].astype(int) == 0, 'template'].tolist()
+        if normal_templates:
+            vocab_templates = normal_templates
+            print(f"Building vocab from normal rows only: {len(vocab_templates):,}/{len(df):,}", flush=True)
+    vocab=EventVocab(); vocab.build(vocab_templates); df['event_id']=df['template'].apply(vocab.encode)
+    unk_count = int((df['event_id'] == vocab.event_to_id[vocab.unk_token]).sum())
+    print(f"Built vocab_size={len(vocab):,} unk_encoded_rows={unk_count:,}; building sequences...", flush=True)
     seqs, labels, ids, masks = build_event_sequences(df, c['data']['min_seq_len'], return_masks=True)
     scale_lengths = c.get('multi_scale', {}).get('lengths', []) if c.get('multi_scale', {}).get('enabled', False) else []
     sequence_window_len = max([int(c['data']['max_seq_len'])] + [int(x) for x in scale_lengths])

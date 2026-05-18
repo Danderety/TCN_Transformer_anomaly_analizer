@@ -124,6 +124,10 @@ class LoghubAdapter(GenericDirectoryLogAdapter):
         chunk_size=500000,
         rare_transition_max_count=2,
         transition_top_k=32,
+        row_budget=None,
+        block_complete_budget=False,
+        budget_balance_labels=True,
+        budget_anomaly_fraction=0.5,
         **kwargs,
     ):
         super().__init__(raw_dir, max_files=max_files, max_lines_per_file=max_lines_per_file)
@@ -135,6 +139,10 @@ class LoghubAdapter(GenericDirectoryLogAdapter):
         self.chunk_size = int(chunk_size)
         self.rare_transition_max_count = int(rare_transition_max_count)
         self.transition_top_k = int(transition_top_k)
+        self.row_budget = int(row_budget) if row_budget is not None else None
+        self.block_complete_budget = bool(block_complete_budget)
+        self.budget_balance_labels = bool(budget_balance_labels)
+        self.budget_anomaly_fraction = float(budget_anomaly_fraction)
 
     def _find_label_path(self):
         candidates = []
@@ -183,6 +191,62 @@ class LoghubAdapter(GenericDirectoryLogAdapter):
         if self.max_blocks is not None and len(selected) > int(self.max_blocks):
             selected = selected[:int(self.max_blocks)]
         return set(selected)
+
+    def _count_structured_blocks(self, structured, labels):
+        counts = {}
+        first_seen = {}
+        seen_index = 0
+        for chunk in pd.read_csv(structured, usecols=['Content'], chunksize=self.chunk_size):
+            block_ids = chunk['Content'].map(self._extract_block_id)
+            block_ids = block_ids[block_ids.isin(labels)]
+            for block, count in block_ids.value_counts(sort=False).items():
+                block = str(block)
+                if block not in first_seen:
+                    first_seen[block] = seen_index
+                    seen_index += 1
+                counts[block] = counts.get(block, 0) + int(count)
+        return counts, first_seen
+
+    def _take_blocks_until_budget(self, blocks, counts, row_budget):
+        selected = []
+        used = 0
+        for block in blocks:
+            count = int(counts.get(block, 0))
+            if count <= 0:
+                continue
+            if used and used + count > row_budget:
+                continue
+            selected.append(block)
+            used += count
+            if used >= row_budget:
+                break
+        return selected, used
+
+    def _select_budget_blocks(self, structured, labels):
+        if not (self.row_budget and self.block_complete_budget):
+            return None, None
+        counts, first_seen = self._count_structured_blocks(structured, labels)
+        ordered = sorted(counts, key=lambda block: (first_seen.get(block, 10**12), block))
+        if not self.budget_balance_labels:
+            selected, used = self._take_blocks_until_budget(ordered, counts, self.row_budget)
+            return set(selected), {'selected_rows': used, 'selected_blocks': len(selected)}
+
+        anomaly_budget = int(self.row_budget * min(max(self.budget_anomaly_fraction, 0.0), 1.0))
+        normal_budget = max(0, self.row_budget - anomaly_budget)
+        anomaly_blocks = [block for block in ordered if int(labels.get(block, 0)) == 1]
+        normal_blocks = [block for block in ordered if int(labels.get(block, 0)) == 0]
+        selected_anomaly, anomaly_rows = self._take_blocks_until_budget(anomaly_blocks, counts, anomaly_budget)
+        normal_budget += max(0, anomaly_budget - anomaly_rows)
+        selected_normal, normal_rows = self._take_blocks_until_budget(normal_blocks, counts, normal_budget)
+        selected = selected_normal + selected_anomaly
+        return set(selected), {
+            'selected_rows': int(normal_rows + anomaly_rows),
+            'selected_blocks': len(selected),
+            'selected_normal_blocks': len(selected_normal),
+            'selected_anomaly_blocks': len(selected_anomaly),
+            'selected_normal_rows': int(normal_rows),
+            'selected_anomaly_rows': int(anomaly_rows),
+        }
 
     def _event_token(self, event_id):
         event_id = str(event_id).strip() or 'UNKNOWN'
@@ -285,6 +349,18 @@ class LoghubAdapter(GenericDirectoryLogAdapter):
             if label_path is not None:
                 labels = self._load_block_labels(label_path)
                 selected_blocks = self._select_blocks(labels)
+                budget_summary = None
+                if selected_blocks is None:
+                    selected_blocks, budget_summary = self._select_budget_blocks(structured, labels)
+                    if budget_summary is not None:
+                        print(
+                            'Loghub block-complete budget: '
+                            f"rows={budget_summary['selected_rows']:,} "
+                            f"blocks={budget_summary['selected_blocks']:,} "
+                            f"normal_blocks={budget_summary.get('selected_normal_blocks', 0):,} "
+                            f"anomaly_blocks={budget_summary.get('selected_anomaly_blocks', 0):,}",
+                            flush=True,
+                        )
                 if selected_blocks is not None or not self.max_lines_per_file:
                     parts = []
                     for chunk in pd.read_csv(structured, usecols=['LineId', 'Content', 'EventId'], chunksize=self.chunk_size):
@@ -594,6 +670,10 @@ def get_adapter(
     loghub_chunk_size=500000,
     loghub_rare_transition_max_count=2,
     loghub_transition_top_k=32,
+    loghub_row_budget=None,
+    loghub_block_complete_budget=False,
+    loghub_budget_balance_labels=True,
+    loghub_budget_anomaly_fraction=0.5,
     rcaeval_window_size=128,
     rcaeval_top_k=8,
     rcaeval_abnormal_z=2.0,
@@ -620,6 +700,10 @@ def get_adapter(
             chunk_size=loghub_chunk_size,
             rare_transition_max_count=loghub_rare_transition_max_count,
             transition_top_k=loghub_transition_top_k,
+            row_budget=loghub_row_budget,
+            block_complete_budget=loghub_block_complete_budget,
+            budget_balance_labels=loghub_budget_balance_labels,
+            budget_anomaly_fraction=loghub_budget_anomaly_fraction,
         )
     if name == 'rcaeval':
         return RCAEvalAdapter(
